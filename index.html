@@ -59,6 +59,7 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--ui);font-size:15px;
   line-height:1.45;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums;
   display:flex;justify-content:center}
@@ -327,7 +328,7 @@ function fatal(what, detail){
     const gate = document.getElementById('gate');
     const tabs = document.querySelector('tabs');
     const shell = document.getElementById('shell');
-    if(gate) gate.hidden = true;
+    if(gate) gate.remove();
     if(tabs) tabs.hidden = true;
     if(shell) shell.hidden = false;
     const app = document.getElementById('app');
@@ -1091,7 +1092,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '27 Oct 21:41';
+const BUILD = '27 Oct 21:57';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1249,7 +1250,8 @@ function showUnlock(payload, message){
       if(document.getElementById('gateremember').checked) await rememberKey(key, salt);
     }catch(ex){ /* storage blocked: unlock again next time, nothing else breaks */ }
 
-    document.getElementById('gate').hidden = true;
+    const gateEl = document.getElementById('gate');
+    if(gateEl) gateEl.remove();
     document.getElementById('shell').hidden = false;
     document.querySelector('tabs').hidden = false;
 
