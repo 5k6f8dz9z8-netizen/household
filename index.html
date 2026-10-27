@@ -1084,8 +1084,31 @@ async function recallKey(salt){
 }
 function forgetKey(){ try{ localStorage.removeItem(KEY_STORE); }catch(e){} }
 
+
+/* A passphrase typed or pasted on a phone picks up stray whitespace, and iOS
+   smart punctuation rewrites hyphens as en/em dashes. Try the obvious
+   repairs before telling someone they got it wrong. */
+function passCandidates(raw){
+  const tidy = (x) => x
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')        // zero-width characters
+    .replace(/[\u2010-\u2015\u2212]/g, '-')       // – — ‒ − and friends
+    .replace(/\u00A0/g, ' ')                       // non-breaking space
+    .trim();
+  const out = [raw, tidy(raw), tidy(raw).toLowerCase(),
+               tidy(raw).replace(/\s+/g, '-'), tidy(raw).replace(/\s/g, '')];
+  return [...new Set(out.filter(Boolean))];
+}
+
 /* ---------- unlock screen ---------- */
 function showUnlock(payload, message){
+  if(!payload || !payload.ct || !payload.salt || !payload.iterations){
+    document.getElementById('gate').hidden = false;
+    document.getElementById('gate').innerHTML =
+      '<div class="gate-card"><h1>Household</h1><p class="gate-note">' +
+      'data.enc.json loaded but is not in the expected format, so there is nothing to unlock. ' +
+      'Re-upload the file from the bundle.</p></div>';
+    return;
+  }
   document.getElementById('shell').hidden = true;
   document.querySelector('tabs').hidden = true;
   const gate = document.getElementById('gate');
@@ -1127,10 +1150,26 @@ function showUnlock(payload, message){
     go.disabled = true; go.textContent = 'Unlocking…'; err.hidden = true;
     // let the button repaint before the key derivation blocks the thread
     await new Promise(r => setTimeout(r, 30));
+    if(!(window.crypto && window.crypto.subtle)){
+      go.disabled = false; go.textContent = 'Unlock';
+      err.textContent = 'This browser will not let the page decrypt anything. '
+        + 'Open the site over https in Safari or Chrome rather than from a file or an embedded view.';
+      err.hidden = false;
+      return;
+    }
+    const salt = b64.from(payload.salt);
+    let key = null, plain = null;
+    for(const candidate of passCandidates(pass)){
+      try{
+        const k = await deriveKey(candidate, salt, payload.iterations);
+        plain = await decryptPayload(payload, k);
+        key = k;
+        break;
+      }catch(ignored){ /* try the next repair */ }
+    }
     try{
-      const salt = b64.from(payload.salt);
-      const key = await deriveKey(pass, salt, payload.iterations);
-      DATA = {...DEFAULT_DATA, ...(await decryptPayload(payload, key))};
+      if(!key) throw new Error('no candidate worked');
+      DATA = {...DEFAULT_DATA, ...plain};
       CRYPTO = {key, salt, iterations: payload.iterations};
       if(document.getElementById('gateremember').checked) await rememberKey(key, salt);
       // give Safari a moment to notice a successful sign-in and offer to save it
@@ -1142,7 +1181,8 @@ function showUnlock(payload, message){
       }, 120);
     }catch(ex){
       go.disabled = false; go.textContent = 'Unlock';
-      err.textContent = 'That passphrase did not work. Check for typos — the words are separated by hyphens.';
+      err.textContent = 'That passphrase did not work. Seven words, lower case, separated by hyphens — '
+        + 'spaces and stray punctuation are corrected automatically, so this is most likely a mistyped word.';
       err.hidden = false;
       document.getElementById('gatepass').select();
     }
