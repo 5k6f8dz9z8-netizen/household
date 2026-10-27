@@ -82,7 +82,8 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--ui);fon
 .gate-card input[type=password]:focus{border-color:var(--accent)}
 .gate-remember{display:flex;align-items:center;justify-content:center;gap:8px;font-size:13px;
   color:var(--ink-2)}
-.gate-err{font-size:13px;color:var(--alert);margin:2px 0 0;line-height:1.45}
+.gate-err{font-size:13px;color:var(--alert);margin:2px 0 0;line-height:1.45;word-break:break-word}
+.gate-err code{font-family:var(--mono);font-size:12px}
 
 /* ---- masthead ---- */
 .brand{display:flex;align-items:center;gap:9px;
@@ -196,6 +197,7 @@ button.row:active,a.row:active{background:var(--accent-soft)}
   box-shadow:0 1px 2px rgba(0,0,0,.10)}
 
 /* ---- tab bar ---- */
+tabs[hidden]{display:none}
 tabs{position:fixed;bottom:0;left:0;right:0;z-index:30;display:flex;justify-content:center;
   background:var(--surface);border-top:1px solid var(--rule)}
 .tabsin{width:100%;max-width:480px;display:flex;
@@ -343,6 +345,17 @@ const CATS = [
   {id:'personal',  name:'Personal money',   emoji:'🙋', color:'#BF5AF2'},
   {id:'other',     name:'Other',            emoji:'📦', color:'#636366'},
 ];
+/* Shape defaults, merged under whatever the data file provides, so an older
+   or partial file still produces an app that renders. */
+const DEFAULT_DATA = {
+  updated: '',
+  people: ['Me', 'Partner'],
+  incomes: [],
+  contributions: [],
+  bills: [],
+  deliveries: [],
+};
+
 const GROUPS = [
   {id:'household', name:'Household bills',            emoji:'🏠'},
   {id:'family',    name:'Regular family outgoings',   emoji:'👨‍👩‍👦'},
@@ -1167,24 +1180,40 @@ function showUnlock(payload, message){
         break;
       }catch(ignored){ /* try the next repair */ }
     }
-    try{
-      if(!key) throw new Error('no candidate worked');
-      DATA = {...DEFAULT_DATA, ...plain};
-      CRYPTO = {key, salt, iterations: payload.iterations};
-      if(document.getElementById('gateremember').checked) await rememberKey(key, salt);
-      // give Safari a moment to notice a successful sign-in and offer to save it
-      render();
-      setTimeout(() => {
-        document.getElementById('gate').hidden = true;
-        document.getElementById('shell').hidden = false;
-        document.querySelector('tabs').hidden = false;
-      }, 120);
-    }catch(ex){
+    // The passphrase either worked or it did not; say so honestly, and never
+    // blame it for a failure that happened after the figures were decrypted.
+    if(!key){
       go.disabled = false; go.textContent = 'Unlock';
       err.textContent = 'That passphrase did not work. Seven words, lower case, separated by hyphens — '
         + 'spaces and stray punctuation are corrected automatically, so this is most likely a mistyped word.';
       err.hidden = false;
       document.getElementById('gatepass').select();
+      return;
+    }
+
+    try{
+      DATA = {...DEFAULT_DATA, ...plain};
+      CRYPTO = {key, salt, iterations: payload.iterations};
+    }catch(ex){
+      err.innerHTML = 'The passphrase was right, but the figures would not load: <br><code>'
+        + esc(ex.name + ': ' + ex.message) + '</code>';
+      err.hidden = false; go.disabled = false; go.textContent = 'Unlock';
+      return;
+    }
+
+    try{
+      if(document.getElementById('gateremember').checked) await rememberKey(key, salt);
+    }catch(ex){ /* storage blocked: unlock again next time, nothing else breaks */ }
+
+    document.getElementById('gate').hidden = true;
+    document.getElementById('shell').hidden = false;
+    document.querySelector('tabs').hidden = false;
+
+    try{
+      render();
+    }catch(ex){
+      document.getElementById('app').innerHTML = '<div class="empty"><h3>Unlocked, but the page failed to draw</h3>'
+        + '<p>Send this to Claude: <code>' + esc(ex.name + ': ' + ex.message) + '</code></p></div>';
     }
   };
   document.getElementById('gatepass').focus();
