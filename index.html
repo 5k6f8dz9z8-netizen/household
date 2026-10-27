@@ -105,6 +105,11 @@ nav.top h1{font-family:var(--display);font-size:27px;font-weight:400;letter-spac
 .addbtn{border:1px solid var(--rule);background:none;color:var(--accent);font:inherit;font-size:13px;
   font-weight:600;padding:6px 13px;border-radius:999px;cursor:pointer;flex:none;align-self:center}
 .addbtn:active{background:var(--accent-soft)}
+.addbtn.done{background:var(--accent);color:var(--on-accent);border-color:transparent}
+nav.top #navright{display:flex;gap:7px;align-items:center}
+.editbar{background:var(--accent-soft);border:1px solid var(--accent);border-radius:4px;
+  padding:11px 13px;font-size:13px;line-height:1.45;color:var(--ink);margin-bottom:-8px}
+.editbar strong{font-weight:600}
 
 main{padding:0 max(18px,env(safe-area-inset-left)) 0 max(18px,env(safe-area-inset-right));
   display:flex;flex-direction:column;gap:30px;padding-block-start:22px}
@@ -358,7 +363,19 @@ window.addEventListener('unhandledrejection', (e) =>
  * Add ?edit to the URL to enable editing and export a new data.json.
  * ------------------------------------------------------------------ */
 
-const EDIT = new URLSearchParams(location.search).has('edit');
+const EDIT_STORE = 'household:edit';
+let EDIT = (() => {
+  try{
+    if(new URLSearchParams(location.search).has('edit')) return true;
+    return localStorage.getItem(EDIT_STORE) === '1';
+  }catch(e){ return false; }
+})();
+function setEditing(on){
+  EDIT = !!on;
+  try{ localStorage.setItem(EDIT_STORE, EDIT ? '1' : '0'); }catch(e){}
+  window.scrollTo(0,0);
+  render();
+}
 let DATA = null, dirty = false, tab = 'month', view = 'month', billView = 'overview';
 let scenario = {commit:0, income:0, bills:0};
 
@@ -1092,7 +1109,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '27 Oct 21:57';
+const BUILD = '27 Oct 22:23';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1488,14 +1505,22 @@ function render(){
   const upd = document.getElementById('brandupd');
   if(upd) upd.textContent = DATA.updated ? 'updated ' + dateShort(DATA.updated).replace(/ \d{4}$/,'') : '';
 
-  const canAdd = EDIT && (tab==='bills' || tab==='setup');
-  $('#navright').innerHTML = canAdd
-    ? `<button class="addbtn" id="addbtn">${tab==='bills'?'Add bill':'Add income'}</button>` : '';
+  const addLabel = tab==='bills' ? 'Add bill' : tab==='setup' ? 'Add income' : '';
+  $('#navright').innerHTML = EDIT
+    ? `${addLabel ? `<button class="addbtn" id="addbtn">${addLabel}</button>` : ''}
+       <button class="addbtn done" id="editdone">Done</button>`
+    : `<button class="addbtn" id="editbtn">Edit</button>`;
   if($('#addbtn')) $('#addbtn').onclick = () => tab==='bills' ? newBill() : newIncome();
+  if($('#editbtn')) $('#editbtn').onclick = () => setEditing(true);
+  if($('#editdone')) $('#editdone').onclick = () => setEditing(false);
 
-  $('#app').innerHTML = tab==='month' ? pageMonth(m)
+  const banner = EDIT ? `<div class="editbar">
+      <span><strong>Editing.</strong> Tap anything to change it${addLabel?`, or ${esc(addLabel.toLowerCase())} above`:''}.
+      ${dirty ? 'Save your changes when you are finished.' : ''}</span>
+    </div>` : '';
+  $('#app').innerHTML = banner + (tab==='month' ? pageMonth(m)
                       : tab==='bills' ? pageBills(m)
-                      : pageSetup(m);
+                      : pageSetup(m));
 
   $('#savebar').innerHTML = (EDIT && dirty)
     ? `<div class="savebar"><button class="btn" id="dl">Save changes to data.json</button></div>` : '';
@@ -1570,16 +1595,23 @@ function render(){
     try{ localStorage.clear(); }catch(e){}
   }
   let payload;
+  // the separate file is what you edit, so it takes precedence
   try{
-    const seed = document.getElementById('seed');
-    if(seed && seed.textContent.trim()) payload = JSON.parse(seed.textContent);
-  }catch(e){ /* fall through to the file */ }
-
-  try{
-    if(payload) throw 'already have it';
     const r = await fetch('data.enc.json?' + Date.now());
     if(!r.ok) throw new Error(r.status);
     payload = await r.json();
+    if(!payload || !payload.ct) throw new Error('not an encrypted file');
+  }catch(e){
+    payload = null;
+    try{
+      const seed = document.getElementById('seed');
+      if(seed && seed.textContent.trim()) payload = JSON.parse(seed.textContent);
+    }catch(e2){ /* fall through to the error below */ }
+  }
+
+  try{
+    if(payload) throw 'already have it';
+    throw new Error('no data available');
   }catch(e){
     if(!payload){
     // unencrypted fallback, for local testing
