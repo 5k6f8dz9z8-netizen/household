@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Household">
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11525B"/>
+      <stop offset="1" stop-color="#0A343A"/>
+    </linearGradient>
+  </defs>
+
+  <!-- full-bleed field; the OS applies its own corner mask -->
+  <rect width="512" height="512" fill="url(#ground)"/>
+
+  <!-- ledger rule the bars sit against -->
+  <rect x="104" y="124" width="6" height="264" rx="3" fill="#EAF2F1" opacity="0.5"/>
+
+  <!-- the household's money, split three ways: joint bills, personal, what's left.
+       Same colours and the same order as the bar on the Month screen. -->
+  <rect x="124" y="136" width="300" height="54" rx="8" fill="#8FD8DF"/>
+  <rect x="124" y="229" width="200" height="54" rx="8" fill="#A98BC4"/>
+  <rect x="124" y="322" width="116" height="54" rx="8" fill="#4FBF83"/>
+</svg>
