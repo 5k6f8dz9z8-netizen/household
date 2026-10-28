@@ -255,6 +255,11 @@ tabs{position:fixed;bottom:0;left:0;right:0;z-index:30;display:flex;justify-cont
   text-align:right;outline:none;flex:1;min-width:0;-webkit-appearance:none;appearance:none;
   font-family:var(--mono)}
 .frow select{direction:rtl;font-family:var(--ui)}
+.fclear{flex:none;border:1px solid var(--rule);background:none;color:var(--ink-2);font:inherit;
+  font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:4px 9px;
+  border-radius:999px;cursor:pointer;margin-left:2px}
+.fclear:active{background:var(--rule-soft)}
+.frow input[type=date]{flex:1;min-width:0}
 .frow input:focus-visible,.frow select:focus-visible{outline:2px solid var(--accent);
   outline-offset:2px;border-radius:2px}
 .amount{display:flex;align-items:center;justify-content:center;gap:3px;padding:8px 0 2px}
@@ -388,7 +393,7 @@ function setEditing(on){
   render();
 }
 let DATA = null, dirty = false, tab = 'month', view = 'month', billView = 'overview';
-let scenario = {commit:0, income:0, bills:0};
+let scenario = {commit:0, bills:0, people:{}};
 
 /* ---------- reference data ---------- */
 const FREQ = [
@@ -549,7 +554,10 @@ function model(){
 
   const renewals = bills.filter(b=>b.renewalDate).sort((a,b)=>a.renewsIn-b.renewsIn);
 
-  // 12 months of actual bill outflow
+  /* Twelve months of actual outflow. Anything that recurs at least monthly
+     lands in every month, so it needs no date. Quarterly and annual bills
+     have to be placed by their next payment date — without one they cannot
+     be drawn at all, so they are counted and reported rather than dropped. */
   const now = new Date(), year=[];
   for(let i=0;i<12;i++){
     const dt=new Date(now.getFullYear(), now.getMonth()+i, 1);
@@ -557,14 +565,27 @@ function model(){
                label:dt.toLocaleDateString('en-GB',{month:'short'}), total:0});
   }
   const endKey = year[11].key;
+  const yearUnplaced = [];
+
   bills.forEach(b=>{
-    let dd=b.nextDue, g=0;
-    while(dd && dd.slice(0,7)<=endKey && g++<400){
-      const r = year.find(y=>y.key===dd.slice(0,7));
+    const f = freqOf(b.frequency);
+    if(f.perMonth >= 1){                       // weekly .. monthly: every month
+      const each = perMonth(b);
+      year.forEach(y => { y.total += each; });
+      return;
+    }
+    if(!b.nextDue){ yearUnplaced.push(b); return; }   // quarterly/annual, no date
+    let dd = b.nextDue, g = 0;
+    while(dd && dd.slice(0,7) <= endKey && g++ < 400){
+      const r = year.find(y => y.key === dd.slice(0,7));
       if(r) r.total += Number(b.amount)||0;
-      dd = advance(dd,b.frequency);
+      dd = advance(dd, b.frequency);
     }
   });
+
+  const yearHigh = Math.max(...year.map(y=>y.total));
+  const yearLow  = Math.min(...year.map(y=>y.total));
+  const yearVaries = (yearHigh - yearLow) > 1;
 
   let sinking = null;
   const yearTotal = year.reduce((s,m)=>s+m.total,0);
@@ -597,7 +618,8 @@ function model(){
   const review = bills.filter(b =>
       (Number(b.amount)||0) > 0 &&
       SWITCHABLE.includes(b.category) &&
-      (contractOf(b) === 'unknown' || (contractOf(b) === 'fixed' && b.renewalDate && b.renewsIn < 0))
+      (contractOf(b) === 'unknown' ||
+       (contractOf(b) === 'fixed' && (!b.renewalDate || b.renewsIn < 0)))
     ).sort((a,b)=>perMonth(b)-perMonth(a));
   const rolling = bills.filter(b => contractOf(b) === 'rolling')
     .sort((a,b)=>perMonth(b)-perMonth(a));
@@ -618,7 +640,7 @@ function model(){
 
   return {incomes, income, bills, billsMonthly, jointMonthly, contributions, contribTotal,
           leftOver, perPerson, need, want, byGroup, renewals, year, sinking, priceRises,
-          keptMonthly, spentMonthly,
+          keptMonthly, spentMonthly, yearUnplaced, yearVaries, yearHigh, yearLow,
           deliveries, kinds, review, reviewTotal, rolling, dates, fuel: fuelForecast(kinds, bills)};
 
 }
@@ -932,37 +954,66 @@ function pageMonth(m){
 
   html += `<details class="scn" id="scenario"><summary>What if?</summary>
     <div style="margin-top:14px">
-      <label class="k" for="sc_commit">New monthly commitment</label>
+      ${m.perPerson.filter(p=>p.income>0).map((p,i)=>{
+        const pct = scenario.people[p.name] || 0;
+        const delta = p.income * pct/100;
+        return `<label class="k" for="sc_p${i}" ${i?'style="display:block;margin-top:16px"':''}>${esc(p.name)}'s pay</label>
+          <input type="range" id="sc_p${i}" data-person="${esc(p.name)}" min="-25" max="25" step="1" value="${pct}">
+          <div class="meta" style="margin-top:-2px">
+            <span>−25%</span>
+            <span class="mono" id="sc_p${i}_v">${pct>0?'+':''}${pct}% · ${delta>=0?'+':'−'}${money(Math.abs(delta))}</span>
+            <span>+25%</span>
+          </div>
+          <div class="sub" id="sc_p${i}_t" style="text-align:center;margin-top:2px">
+            ${money(p.income)} → ${money(p.income + delta)} a month</div>`;
+      }).join('')}
+
+      <label class="k" for="sc_bills" style="display:block;margin-top:16px">Change in bills</label>
+      <input type="range" id="sc_bills" min="-25" max="25" step="1" value="${scenario.bills}">
+      <div class="meta" style="margin-top:-2px"><span>−25%</span>
+        <span class="mono" id="sc_bills_v">${pctLabel(scenario.bills)} · ${scenario.bills>=0?'+':'\u2212'}${money(Math.abs(m.billsMonthly*scenario.bills/100))}</span>
+        <span>+25%</span></div>
+
+      <label class="k" for="sc_commit" style="display:block;margin-top:16px">New monthly commitment</label>
       <input type="range" id="sc_commit" min="0" max="1000" step="10" value="${scenario.commit}">
       <div class="meta" style="margin-top:-2px"><span>£0</span>
         <span class="mono" id="sc_commit_v">${money(scenario.commit)}</span><span>£1,000</span></div>
-      <label class="k" for="sc_income" style="display:block;margin-top:14px">Change in income</label>
-      <input type="range" id="sc_income" min="-25" max="25" step="1" value="${scenario.income}">
-      <div class="meta" style="margin-top:-2px"><span>−25%</span>
-        <span class="mono" id="sc_income_v">${scenario.income>0?'+':''}${scenario.income}%</span><span>+25%</span></div>
-      <label class="k" for="sc_bills" style="display:block;margin-top:14px">Change in bills</label>
-      <input type="range" id="sc_bills" min="-25" max="25" step="1" value="${scenario.bills}">
-      <div class="meta" style="margin-top:-2px"><span>−25%</span>
-        <span class="mono" id="sc_bills_v">${scenario.bills>0?'+':''}${scenario.bills}%</span><span>+25%</span></div>
+
       <div id="sc_out" style="border-top:1px solid var(--rule-soft);margin-top:16px;padding-top:14px"></div>
       <button class="btn ghost" id="sc_reset" style="margin-top:12px">Reset</button>
     </div></details>`;
+
   return html;
 }
 
+const pctLabel = (n) => (n > 0 ? '+' : n < 0 ? '\u2212' : '') + Math.abs(n) + '%';
+
 function scenarioOut(m){
-  const inc = m.income * (1 + scenario.income/100);
+  /* Each person's pay moves on its own, so a rise for one of you reads
+     correctly instead of being averaged across the household. */
+  const named = m.perPerson.reduce((t,p)=>t + p.income * (1 + (scenario.people[p.name]||0)/100), 0);
+  const unattributed = m.income - m.perPerson.reduce((t,p)=>t+p.income, 0);
+  const inc = named + unattributed;
   const bil = m.billsMonthly * (1 + scenario.bills/100) + scenario.commit;
   const left = inc - bil;
   const delta = left - m.leftOver;
+  const incDelta = inc - m.income;
+
+  const rises = m.perPerson.filter(p => (scenario.people[p.name]||0) !== 0)
+    .map(p => `${esc(p.name)} ${pctLabel(scenario.people[p.name])} (${
+      p.income*scenario.people[p.name]/100 >= 0 ? '+' : '−'}${money(Math.abs(p.income*scenario.people[p.name]/100))})`);
+
   return `<div class="k">Left over would be</div>
     <div class="big" style="color:${left<0?'var(--alert)':'var(--good)'};margin-top:4px">${money(left)}</div>
     <p class="hint" style="margin-top:7px">
       ${Math.abs(delta)<1 ? 'The same as now.'
-        : `${delta>0?'Up':'Down'} ${money(Math.abs(delta))} a month on today’s ${money(m.leftOver)} — ${money(Math.abs(delta)*12)} a year.`}
+        : `${delta>0?'Up':'Down'} ${money(Math.abs(delta))} a month on today\u2019s ${money(m.leftOver)} \u2014 ${money(Math.abs(delta)*12)} a year.`}
       ${left<0 ? ' That spends more than comes in.' : ''}
     </p>
-    <p class="hint" style="margin-top:4px;color:var(--ink-3)">Income ${money(inc)} · commitments ${money(bil)}</p>`;
+    ${rises.length ? `<p class="hint" style="margin-top:4px">${rises.join(' · ')}</p>` : ''}
+    <p class="hint" style="margin-top:4px;color:var(--ink-3)">
+      Income ${money(inc)}${Math.abs(incDelta)>=1 ? ` (${incDelta>0?'+':'−'}${money(Math.abs(incDelta))})` : ''}
+      · commitments ${money(bil)}</p>`;
 }
 
 /* ---------- Bills ---------- */
@@ -1052,8 +1103,32 @@ function pageBills(m){
         </div></section>`;
     }
 
-    html += `<section><p class="title">The year ahead</p>${barChart(m.year, m.contribTotal)}
-      <p class="hint">Money actually leaving each month. The dashed line is what you both pay in — bars above it are the months that catch people out.</p></section>`;
+    html += `<section><p class="title">The year ahead<span class="right">${
+        m.yearVaries ? money(m.yearHigh)+' peak' : 'flat'}</span></p>`;
+
+    if(m.yearVaries){
+      html += `${barChart(m.year, m.contribTotal)}
+        <p class="hint">Money actually leaving each month. The dashed line is what you both pay into the
+        joint account — bars above it are the months that catch people out. Between the quietest and the
+        busiest month there is ${money(m.yearHigh - m.yearLow)} of difference.</p>`;
+    } else {
+      html += `<div class="note">
+        <p style="margin:0 0 9px">Every month costs the same, so there is nothing to plot yet.</p>
+        <p style="margin:0;color:var(--ink-2)">That is because all ${m.bills.length} bills are recorded as a
+        monthly amount. Real life is lumpier — car insurance and road tax come once a year. Change those to
+        <strong>Yearly</strong> with the amount you actually pay and the date it leaves, and this chart will
+        show which months are expensive.</p>
+      </div>`;
+    }
+
+    if(m.yearUnplaced.length){
+      html += `<p class="hint">${m.yearUnplaced.length} bill${m.yearUnplaced.length===1?' is':'s are'} missing
+        from the chart — ${m.yearUnplaced.map(b=>esc(b.name)).join(', ')}.
+        ${m.yearUnplaced.length===1?'It is':'They are'} not monthly, so
+        ${m.yearUnplaced.length===1?'it needs':'they need'} a next payment date to know which month to land in.</p>`;
+    }
+
+    html += `</section>`;
 
     m.fuel.forEach(f=>{
       const basis = f.fullYear ? 'last 12 months' : `${f.historyMonths.toFixed(1)} months of records`;
@@ -1252,7 +1327,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '28 Oct 09:21';
+const BUILD = '28 Oct 15:51';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1455,8 +1530,13 @@ function group(fields, caption){
     + `<div class="fgroup">${fields}</div>`;
 }
 function field(label, id, value, type){
+  /* iOS has no way to empty a date input once a date is set — the wheel picker
+     offers no clear — so every date field carries its own Clear. */
+  const clear = type === 'date'
+    ? `<button type="button" class="fclear" data-clear="${id}" aria-label="Clear ${esc(label)}">Clear</button>`
+    : '';
   return `<div class="frow"><label for="f_${id}">${esc(label)}</label>
-    <input id="f_${id}" type="${type||'text'}" value="${esc(value==null?'':value)}"></div>`;
+    <input id="f_${id}" type="${type||'text'}" value="${esc(value==null?'':value)}">${clear}</div>`;
 }
 function select(label, id, value, options){
   return `<div class="frow"><label for="f_${id}">${esc(label)}</label>
@@ -1492,6 +1572,16 @@ function openSheet(title, bodyHtml, onSave, onDelete){
     };
   }
   $('#modal').querySelectorAll('[data-close]').forEach(el => el.onclick = closeSheet);
+
+  $('#modal').querySelectorAll('[data-clear]').forEach(btn => {
+    const input = document.getElementById('f_' + btn.dataset.clear);
+    if(!input) return;
+    const sync = () => { btn.hidden = !input.value; };
+    btn.onclick = () => { input.value = ''; sync(); input.focus(); };
+    input.addEventListener('change', sync);
+    input.addEventListener('input', sync);
+    sync();
+  });
 }
 const closeSheet = () => { $('#modal').innerHTML = ''; };
 
@@ -1683,22 +1773,50 @@ function render(){
 
   const scOut = document.getElementById('sc_out');
   if(scOut){
+    const people = [...document.querySelectorAll('[data-person]')];
+
     const paint = () => {
       scOut.innerHTML = scenarioOut(m);
-      document.getElementById('sc_commit_v').textContent = money(scenario.commit);
-      document.getElementById('sc_income_v').textContent = (scenario.income>0?'+':'')+scenario.income+'%';
-      document.getElementById('sc_bills_v').textContent = (scenario.bills>0?'+':'')+scenario.bills+'%';
+
+      people.forEach((el, i) => {
+        const name = el.dataset.person;
+        const p = m.perPerson.find(x => x.name === name) || {income:0};
+        const pct = scenario.people[name] || 0;
+        const d = p.income * pct/100;
+        const v = document.getElementById('sc_p'+i+'_v');
+        const t = document.getElementById('sc_p'+i+'_t');
+        if(v) v.textContent = pctLabel(pct) + ' · ' + (d>=0?'+':'\u2212') + money(Math.abs(d));
+        if(t) t.textContent = money(p.income) + ' → ' + money(p.income + d) + ' a month';
+      });
+
+      const bv = document.getElementById('sc_bills_v');
+      if(bv){
+        const bd = m.billsMonthly * scenario.bills/100;
+        bv.textContent = pctLabel(scenario.bills) + ' · ' + (bd>=0?'+':'\u2212') + money(Math.abs(bd));
+      }
+      const cv = document.getElementById('sc_commit_v');
+      if(cv) cv.textContent = money(scenario.commit);
     };
-    [['sc_commit','commit'],['sc_income','income'],['sc_bills','bills']].forEach(([id,key])=>{
-      const el = document.getElementById(id);
-      el.oninput = () => { scenario[key] = Number(el.value); paint(); };
+
+    people.forEach(el => {
+      el.oninput = () => { scenario.people[el.dataset.person] = Number(el.value); paint(); };
     });
-    document.getElementById('sc_reset').onclick = (e) => {
+    [['sc_bills','bills'], ['sc_commit','commit']].forEach(([id,key]) => {
+      const el = document.getElementById(id);
+      if(el) el.oninput = () => { scenario[key] = Number(el.value); paint(); };
+    });
+
+    const reset = document.getElementById('sc_reset');
+    if(reset) reset.onclick = (e) => {
       e.preventDefault();
-      scenario = {commit:0, income:0, bills:0};
-      ['sc_commit','sc_income','sc_bills'].forEach(id => document.getElementById(id).value = 0);
+      scenario = {commit:0, bills:0, people:{}};
+      people.forEach(el => { el.value = 0; });
+      ['sc_bills','sc_commit'].forEach(id => {
+        const el = document.getElementById(id); if(el) el.value = 0;
+      });
       paint();
     };
+
     paint();
   }
 
