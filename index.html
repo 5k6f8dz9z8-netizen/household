@@ -1377,7 +1377,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '28 Oct 16:16';
+const BUILD = '28 Oct 16:27';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1627,7 +1627,15 @@ function openSheet(title, bodyHtml, onSave, onDelete){
     const input = document.getElementById('f_' + btn.dataset.clear);
     if(!input) return;
     const sync = () => { btn.hidden = !input.value; };
-    btn.onclick = () => { input.value = ''; sync(); input.focus(); };
+    btn.onclick = (e) => {
+      e.preventDefault();
+      /* Never focus a date input to clear it — on iOS that reopens the wheel,
+         which commits a date straight back into the field just emptied. */
+      input.value = '';
+      input.blur();
+      input.dispatchEvent(new Event('change', {bubbles:true}));
+      sync();
+    };
     input.addEventListener('change', sync);
     input.addEventListener('input', sync);
     sync();
@@ -1669,6 +1677,8 @@ function editBill(id){
         renewalDate:val('renewalDate'), noticeDays:num('noticeDays'),
         previousAmount:num('previousAmount'), website:val('website').trim(),
         accountRef:val('accountRef').trim(), note:val('note').trim(),
+        /* last, so it overrides the two above: a rolling bill has nothing to renew */
+        ...(val('contract') === 'rolling' ? {renewalDate:'', noticeDays:0} : {}),
       });
     },
     () => { DATA.bills = DATA.bills.filter(x=>x.id!==id); }
