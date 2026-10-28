@@ -429,6 +429,21 @@ const pad = (n) => String(n).padStart(2,'0');
 const uid = () => 'x' + Math.random().toString(36).slice(2,9);
 const freqOf = (id) => FREQ.find(f=>f.id===id) || FREQ[3];
 const catOf  = (id) => CATS.find(c=>c.id===id) || CATS[CATS.length-1];
+
+/* A bill is on a fixed term with an end date, on a rolling arrangement with
+   no end date at all (council tax, a subscription kept month to month), or
+   nobody has recorded which yet. Only the last of those is worth chasing. */
+const CONTRACTS = [
+  ['fixed',   'Fixed term'],
+  ['rolling', 'Rolling — no end date'],
+  ['unknown', 'Not recorded yet'],
+];
+function contractOf(b){
+  if(b.contract) return b.contract;
+  if(b.renewalDate) return 'fixed';          // a date implies a fixed term
+  if(b.review === false) return 'rolling';   // what the old flag meant
+  return 'unknown';
+}
 const groupOf= (id) => GROUPS.find(g=>g.id===id) || GROUPS[0];
 const perMonth = (x) => (Number(x.amount)||0) * freqOf(x.frequency).perMonth;
 
@@ -564,10 +579,11 @@ function model(){
   const SWITCHABLE = ['energy','comms','insurance','subs','home','debt','water'];
   const review = bills.filter(b =>
       (Number(b.amount)||0) > 0 &&
-      b.review !== false &&
       SWITCHABLE.includes(b.category) &&
-      (!b.renewalDate || b.renewsIn < 0)
+      (contractOf(b) === 'unknown' || (contractOf(b) === 'fixed' && b.renewalDate && b.renewsIn < 0))
     ).sort((a,b)=>perMonth(b)-perMonth(a));
+  const rolling = bills.filter(b => contractOf(b) === 'rolling')
+    .sort((a,b)=>perMonth(b)-perMonth(a));
   const reviewTotal = review.reduce((s,b)=>s+perMonth(b),0);
 
   // --- calendar dates worth exporting ---
@@ -585,7 +601,7 @@ function model(){
 
   return {incomes, income, bills, billsMonthly, jointMonthly, contributions, contribTotal,
           leftOver, perPerson, need, want, byGroup, renewals, year, sinking, priceRises,
-          deliveries, kinds, review, reviewTotal, dates, fuel: fuelForecast(kinds, bills)};
+          deliveries, kinds, review, reviewTotal, rolling, dates, fuel: fuelForecast(kinds, bills)};
 
 }
 
@@ -593,27 +609,60 @@ function model(){
 /* ---------- fuel run-rate ---------- */
 function fuelForecast(kinds, bills){
   const linked = bills.filter(b=>b.deliveryKind).map(b=>b.deliveryKind);
+  const budget = new Map(bills.filter(b=>b.deliveryKind).map(b=>[b.deliveryKind, perMonth(b)]));
   const out = [];
+  const today = todayISO();
+  const dayNum = (iso) => new Date(iso+'T00:00:00').getTime()/86400000;
+
   kinds.forEach(k=>{
-    if(!linked.includes(k.kind) || k.items.length < 2) return;
+    if(!linked.includes(k.kind)) return;
     const sorted = [...k.items].filter(x=>x.date).sort((a,b)=>a.date.localeCompare(b.date));
-    if(sorted.length < 2) return;
+    if(!sorted.length) return;
+
     const first = sorted[0], last = sorted[sorted.length-1];
-    const days = (new Date(last.date+'T00:00:00') - new Date(first.date+'T00:00:00')) / 86400000;
-    if(days <= 0) return;
-    // everything bought before the final fill was consumed over that span
-    const consumed = sorted.slice(0,-1).reduce((s,x)=>s+(Number(x.qty)||0),0);
-    const perMonthQty = consumed / (days/30.44);
-    const perDayQty = consumed / days;
-    if(perDayQty <= 0) return;
+    const historyDays = dayNum(today) - dayNum(first.date);
+    if(historyDays <= 0) return;
+
+    /* Each delivery is consumed from its own date until the next one arrives.
+       The final delivery is assumed to be still in the tank, so it covers
+       everything up to today — that is what brings the quiet months into the
+       average instead of stopping the clock at the last fill. */
+    const windowStart = Math.max(dayNum(first.date), dayNum(today) - 365);
+    const windowDays = dayNum(today) - windowStart;
+    let costWindow = 0, qtyWindow = 0;
+
+    sorted.forEach((x, i) => {
+      const start = dayNum(x.date);
+      const end = i+1 < sorted.length ? dayNum(sorted[i+1].date) : dayNum(today);
+      const covers = end - start;
+      if(covers <= 0) return;
+      const overlap = Math.max(Math.min(end, dayNum(today)) - Math.max(start, windowStart), 0);
+      const share = overlap / covers;
+      costWindow += (Number(x.cost)||0) * share;
+      qtyWindow  += (Number(x.qty)||0)  * share;
+    });
+
+    const windowMonths  = Math.max(windowDays / 30.44, 0.5);
+    const historyMonths = Math.max(historyDays / 30.44, 0.5);
+    const totalCost = sorted.reduce((t,x)=>t+(Number(x.cost)||0), 0);
+    const totalQty  = sorted.reduce((t,x)=>t+(Number(x.qty)||0), 0);
     const lastQty = Number(last.qty)||0;
-    const lastUnit = (Number(last.cost)||0) / Math.max(lastQty,1);
-    const runsOutDays = Math.round(lastQty / perDayQty);
-    const runsOut = (()=>{ const d=new Date(last.date+'T00:00:00'); d.setDate(d.getDate()+runsOutDays);
-      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; })();
-    out.push({kind:k.kind, unit:k.unit, perMonthQty, lastDate:last.date, lastQty, lastUnit,
-      runsOut, daysLeft: daysUntil(runsOut), typicalFill: lastQty,
-      estCost: lastQty * lastUnit, monthlyCost: perMonthQty * lastUnit});
+    const lastUnit = lastQty > 0 ? (Number(last.cost)||0)/lastQty : 0;
+
+    out.push({
+      kind: k.kind, unit: k.unit,
+      costPerMonth: costWindow / windowMonths,
+      qtyPerMonth:  qtyWindow / windowMonths,
+      windowMonths, fullYear: windowDays >= 364,
+      allCostPerMonth: totalCost / historyMonths,
+      allQtyPerMonth:  totalQty / historyMonths,
+      historyMonths, totalCost, totalQty,
+      lastDate: last.date, lastQty, lastUnit,
+      estCost: lastQty * lastUnit,
+      daysSinceLast: Math.round(dayNum(today) - dayNum(last.date)),
+      budget: budget.get(k.kind) || 0,
+      deliveries: sorted.length,
+    });
   });
   return out;
 }
@@ -788,14 +837,15 @@ function attention(m){
       body:`Your biggest outgoing at ${money(b.amount,2)} a month. Set the fixed-rate end date and you get six months’ warning.`,
       amt:'', act:['bill', b.id]});
   });
-  m.fuel.filter(f=>f.daysLeft<0).forEach(f=>{
-    out.push({sev:'med', sort:-400, title:`${f.kind} is probably due`,
-      body:`At about ${Math.round(f.perMonthQty)} ${f.unit} a month, the last fill would have run out around ${dateShort(f.runsOut)}. A fill costs roughly ${money(f.estCost)}.`,
+  m.fuel.filter(f=>f.daysSinceLast >= 150).forEach(f=>{
+    const months = Math.round(f.daysSinceLast/30.44);
+    out.push({sev:'med', sort:-400, title:`No ${f.kind.toLowerCase()} delivery logged for ${months} months`,
+      body:`The last one was ${dateShort(f.lastDate)}. If there has been a fill since, logging it keeps the monthly cost honest — until then it is spread over the whole gap.`,
       amt:'', act:['tab','bills']});
   });
   if(m.review.length){
     out.push({sev:'low', sort:9999, title:`${m.review.length} bills with no live contract date`,
-      body:`${money(m.reviewTotal)} a month, ${money(m.reviewTotal*12)} a year. Either they’re out of contract or the date isn’t recorded.`,
+      body:`${money(m.reviewTotal)} a month, ${money(m.reviewTotal*12)} a year. Set each one to a fixed term with its end date, or mark it rolling if there is nothing to renew.`,
       amt:'', act:['bills-view','contracts']});
   }
   return out.sort((a,b)=>a.sort-b.sort);
@@ -947,16 +997,26 @@ function pageBills(m){
       <p class="hint">Money actually leaving each month. The dashed line is what you both pay in — bars above it are the months that catch people out.</p></section>`;
 
     m.fuel.forEach(f=>{
-      html += `<section><p class="title">${esc(f.kind)}<span class="right">${Math.round(f.perMonthQty)} ${esc(f.unit)}/mth</span></p>
+      const basis = f.fullYear ? 'last 12 months' : `${f.historyMonths.toFixed(1)} months of records`;
+      const vsBudget = f.budget > 0 ? f.costPerMonth - f.budget : null;
+      html += `<section><p class="title">${esc(f.kind)}<span class="right">${basis}</span></p>
         <div class="pair">
-          <div><div class="k">A typical fill</div><div class="big" style="font-size:24px;margin-top:3px">${money(f.estCost)}</div>
+          <div><div class="k">Cost a month</div>
+            <div class="big" style="font-size:24px;margin-top:3px">${money(f.costPerMonth)}</div>
+            <div class="sub">${Math.round(f.qtyPerMonth)} ${esc(f.unit)} a month</div></div>
+          <div><div class="k">A typical fill</div>
+            <div class="big" style="font-size:24px;margin-top:3px">${money(f.estCost)}</div>
             <div class="sub">${f.lastQty} ${esc(f.unit)} at last price</div></div>
-          <div><div class="k">True monthly cost</div><div class="big" style="font-size:24px;margin-top:3px">${money(f.monthlyCost)}</div>
-            <div class="sub">what it averages out at</div></div>
         </div>
-        <p class="hint">${f.daysLeft<0
-          ? `The ${f.lastQty} ${esc(f.unit)} bought on ${dateShort(f.lastDate)} would have run out around ${dateShort(f.runsOut)}. Either you are low, or a delivery has not been logged.`
-          : `Next fill due around ${dateShort(f.runsOut)}, ${countdown(f.daysLeft)}.`}</p></section>`;
+        ${vsBudget !== null ? `<div class="meta">
+          <span>Budgeted ${money(f.budget)} a month</span>
+          <span class="mono" style="color:${vsBudget > 0 ? 'var(--alert)' : 'var(--good)'}">
+            ${vsBudget > 0 ? money(vsBudget)+' over' : money(-vsBudget)+' under'}</span></div>` : ''}
+        <p class="hint">
+          Every delivery is spread over the months it covers, and the last load is counted as still
+          in the tank — so the quiet months since ${dateShort(f.lastDate)} pull the average down rather than being skipped.
+          ${f.deliveries > 1 ? `Across all ${f.historyMonths.toFixed(1)} months of records it works out at ${money(f.allCostPerMonth)} a month.` : ''}
+        </p></section>`;
     });
 
     html += `<section><p class="title">Deliveries<span class="right">${m.deliveries.length}</span></p>
@@ -1007,7 +1067,9 @@ function pageBills(m){
             <span class="s">${esc(b.provider||'No provider set')} · ${b.renewalDate?'ended '+dateShort(b.renewalDate):'no contract date'}</span></span>
           <span class="amt">${money(b.amount,2)}</span></${EDIT?'button':'div'}>`;
       }).join('')}</div>
-      <p class="hint">${money(m.reviewTotal*12)} a year on things with no live contract date. Either they are out of contract, or the date has not been recorded — both worth ten minutes.</p></section>`;
+      <p class="hint">${money(m.reviewTotal*12)} a year on things with no live contract date. Open one and set
+      its contract to <em>Fixed term</em> with the end date, or <em>Rolling</em> if there is no end date
+      to record — rolling ones drop off this list.</p></section>`;
   }
 
   if(m.renewals.length){
@@ -1022,6 +1084,28 @@ function pageBills(m){
         </${EDIT?'button':'div'}>`;
       }).join('')}</div>
       <p class="hint">Providers move you onto a standard tariff the day a contract ends, so the useful moment is a month before.</p></section>`;
+  }
+
+  if(m.rolling.length){
+    html += `<section><p class="title">Rolling — no end date<span class="right">${m.rolling.length}</span></p>
+      <div class="list">${m.rolling.map(b=>{
+        const c = catOf(b.category);
+        return `<${EDIT?'button':'div'} class="row" ${EDIT?`data-edit="bill" data-id="${esc(b.id)}"`:''}>
+          <span class="ico" style="background:${c.color}22">${c.emoji}</span>
+          <span class="main"><span class="t">${esc(b.name)}</span>
+            <span class="s">${esc(b.provider||'No provider set')}</span></span>
+          <span class="amt">${money(b.amount,2)}</span></${EDIT?'button':'div'}>`;
+      }).join('')}</div>
+      <p class="hint">Nothing to renew on these, so they stay off the list above. Open one and set it back to
+      <em>Fixed term</em> if that ever changes.</p></section>`;
+  }
+
+  if(!m.review.length && !m.renewals.length && !m.rolling.length){
+    html += `<div class="empty"><h3>No contract details yet</h3>
+      <p>Open any bill and set its contract to a fixed term with an end date, or mark it rolling if
+      there is nothing to renew. Renewal warnings and the calendar export work from those dates.</p></div>`;
+  } else if(!m.review.length){
+    html += `<div class="note">Every switchable bill has its contract recorded. Nothing to chase.</div>`;
   }
 
   html += `<section><p class="title">Calendar</p>
@@ -1109,7 +1193,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '27 Oct 22:23';
+const BUILD = '28 Oct 08:35';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1366,11 +1450,12 @@ function editBill(id){
       select('Joint account','joint',b.joint?'y':'n',[['y','Yes'],['n','No']]) +
       select('Paid by','person',b.person,(DATA.people||[]).map(p=>[p,p])), 'Who it belongs to') +
     group(
-      field('Next payment','nextDue',b.nextDue,'date') +
+      select('Contract','contract',contractOf(b),CONTRACTS) +
       field('Contract ends','renewalDate',b.renewalDate,'date') +
       field('Notice period (days)','noticeDays',b.noticeDays) +
-      select('Major commitment','major',b.major?'y':'n',[['n','No'],['y','Yes — warn 6 months ahead']]) +
-      select('Show in "worth a look"','review',b.review===false?'n':'y',[['y','Yes'],['n','No']]), 'Contract') +
+      field('Next payment','nextDue',b.nextDue,'date') +
+      select('Major commitment','major',b.major?'y':'n',[['n','No'],['y','Yes — warn 6 months ahead']]),
+      'Contract — leave the end date blank for a rolling one') +
     group(
       field('Price before','previousAmount',b.previousAmount||'') +
       field('Website','website',b.website) +
@@ -1380,7 +1465,7 @@ function editBill(id){
       Object.assign(b,{
         name:val('name').trim()||b.name, provider:val('provider').trim(), amount:num('amount'),
         frequency:val('frequency'), category:val('category'), group:val('group'), need:val('need'),
-        joint: val('joint')==='y', major: val('major')==='y', review: val('review')!=='n',
+        joint: val('joint')==='y', major: val('major')==='y', contract: val('contract'),
         person:val('person'), nextDue:val('nextDue'),
         renewalDate:val('renewalDate'), noticeDays:num('noticeDays'),
         previousAmount:num('previousAmount'), website:val('website').trim(),
@@ -1483,17 +1568,18 @@ function renderTabs(){
 
 function exportCSV(m){
   const rows = [['Type','Name','Provider','Amount','Frequency','Per month','Who','Next payment',
-    'Contract ends','Notice days','Group','Need/want','Joint','Price before','Website','Account','Notes']];
+    'Contract','Contract ends','Notice days','Group','Need/want','Joint','Price before','Website','Account','Notes']];
   m.incomes.forEach(i=>rows.push(['Income',i.label,'',i.amount,freqOf(i.frequency).label,
-    perMonth(i).toFixed(2),i.person,i.payday||'','','','','','','','','',i.role||'']));
+    perMonth(i).toFixed(2),i.person,i.payday||'','','','','','','','','','',i.role||'']));
   m.contributions.forEach(c=>rows.push(['Contribution',c.person,'',c.amount,'Monthly',
-    Number(c.amount).toFixed(2),c.person,'','','','','','','','','','']));
+    Number(c.amount).toFixed(2),c.person,'','','','','','','','','','','']));
   m.bills.forEach(b=>rows.push(['Bill',b.name,b.provider||'',b.amount,freqOf(b.frequency).label,
-    perMonth(b).toFixed(2),b.person,b.nextDue||'',b.renewalDate||'',b.noticeDays||'',
+    perMonth(b).toFixed(2),b.person,b.nextDue||'',
+    (CONTRACTS.find(c=>c[0]===contractOf(b))||['',''])[1],b.renewalDate||'',b.noticeDays||'',
     groupOf(b.group).name,b.need==='want'?'Want':'Need',b.joint===false?'No':'Yes',
     b.previousAmount||'',b.website||'',b.accountRef||'',b.note||'']));
   m.deliveries.forEach(d=>rows.push(['Delivery',d.kind,d.provider||'',d.cost,'',
-    '','',d.date||'','','','','','','','','',`${d.qty} ${d.unit}`]));
+    '','',d.date||'','','','','','','','','','',`${d.qty} ${d.unit}`]));
   const csv = rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
   offerFile('Everything', 'household-finance.csv', csv,
     'Every income, contribution, bill and delivery in one sheet.');
