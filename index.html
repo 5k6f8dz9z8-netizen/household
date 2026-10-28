@@ -182,6 +182,17 @@ button.row:active,a.row:active{background:var(--accent-soft)}
   background:var(--rule-soft)}
 
 /* ---- figures side by side ---- */
+.brk{display:flex;align-items:baseline;gap:8px;padding:9px 0;border-top:1px solid var(--rule-soft);
+  font-size:13.5px}
+.brk-head{display:flex;gap:8px;padding:10px 0 2px;font-size:10px;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-3)}
+.brk-n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brk-v{flex:none;width:72px;text-align:right;font-family:var(--mono);font-size:12.5px}
+.brk-p{flex:none;width:34px;text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.brk.sum{border-top:1px solid var(--rule);font-weight:600}
+.brk.sum .brk-v{font-weight:600}
+@media (max-width:360px){ .brk-v{width:64px} .brk-n{font-size:12.5px} }
+
 .pair{display:flex;border:1px solid var(--rule-soft);border-radius:4px;background:var(--surface)}
 .pair>div{flex:1;min-width:0;padding:15px 16px}
 .pair>div+div{border-left:1px solid var(--rule-soft)}
@@ -525,6 +536,12 @@ function model(){
   let need=0, want=0;
   bills.forEach(b => b.need==='want' ? (want+=perMonth(b)) : (need+=perMonth(b)));
 
+  /* Investing is not an outgoing — the money is still yours. Keeping the two
+     apart is the difference between "we spend 92% of our income" and the truth. */
+  const keptMonthly = bills.filter(b => (b.group||'household') === 'savings')
+    .reduce((t,b)=>t+perMonth(b), 0);
+  const spentMonthly = billsMonthly - keptMonthly;
+
   const byGroup = GROUPS.map(g=>{
     const items = bills.filter(b=>(b.group||'household')===g.id);
     return {...g, items, total: items.reduce((s,b)=>s+perMonth(b),0)};
@@ -601,6 +618,7 @@ function model(){
 
   return {incomes, income, bills, billsMonthly, jointMonthly, contributions, contribTotal,
           leftOver, perPerson, need, want, byGroup, renewals, year, sinking, priceRises,
+          keptMonthly, spentMonthly,
           deliveries, kinds, review, reviewTotal, rolling, dates, fuel: fuelForecast(kinds, bills)};
 
 }
@@ -962,15 +980,56 @@ function pageBills(m){
 
   if(billView==='overview'){
     const nw = m.need + m.want;
-    html += `<section><div class="pair">
-      <div><div class="k">Every month</div><div class="big" style="margin-top:3px">${money(m.billsMonthly)}</div></div>
-      <div><div class="k">Every year</div><div class="big" style="margin-top:3px">${money(m.billsMonthly*12)}</div></div>
-    </div>
-    ${m.income>0?`<div class="bar" style="margin-top:14px">
-      <i style="width:${Math.min((m.billsMonthly/m.income)*100,100)}%;
-        background:${m.billsMonthly/m.income>0.6?'var(--alert)':'var(--accent)'}"></i></div>
-      <div class="meta"><span>${Math.round((m.billsMonthly/m.income)*100)}% of what comes in</span>
-      <span class="mono">${money(m.income-m.billsMonthly)} left</span></div>`:''}
+    const pc = (v) => m.income > 0 ? (v/m.income)*100 : 0;
+    const GCOL = {household:'var(--accent)', family:'var(--purple)',
+                  personal:'var(--warn)', savings:'var(--good)'};
+
+    const segs = [...m.byGroup.map(g=>({name:g.name, value:g.total, color:GCOL[g.id]||'var(--ink-3)'})),
+                  {name:'Left over', value:Math.max(m.leftOver,0), color:'var(--ink-3)'}];
+
+    const line = (label, mo, cls) => `<div class="brk ${cls||''}">
+        <span class="brk-n">${esc(label)}</span>
+        <span class="brk-v">${money(mo)}</span>
+        <span class="brk-v">${money(mo*12)}</span>
+        <span class="brk-p">${Math.round(pc(mo))}%</span>
+      </div>`;
+
+    html += `<section>
+      <p class="title">Against income<span class="right">${money(m.income)}/mth</span></p>
+      <div class="split" style="margin-top:0">${segs.filter(x=>x.value>0).map(x=>
+        `<i style="width:${pc(x.value)}%;background:${x.color}"></i>`).join('')}</div>
+      <div class="brk-head">
+        <span class="brk-n"></span><span class="brk-v">a month</span>
+        <span class="brk-v">a year</span><span class="brk-p">share</span>
+      </div>
+      ${m.byGroup.map(g=>`<div class="brk">
+          <span class="brk-n"><i class="dot" style="background:${GCOL[g.id]||'var(--ink-3)'}"></i>${esc(g.name)}</span>
+          <span class="brk-v">${money(g.total)}</span>
+          <span class="brk-v">${money(g.total*12)}</span>
+          <span class="brk-p">${Math.round(pc(g.total))}%</span>
+        </div>`).join('')}
+      ${line('Total committed', m.billsMonthly, 'sum')}
+      <div class="brk">
+        <span class="brk-n"><i class="dot" style="background:var(--ink-3)"></i>Left over</span>
+        <span class="brk-v">${money(m.leftOver)}</span>
+        <span class="brk-v">${money(m.leftOver*12)}</span>
+        <span class="brk-p">${Math.round(pc(m.leftOver))}%</span>
+      </div>
+      ${line('Income', m.income, 'sum')}
+    </section>
+
+    <section>
+      <p class="title">Spent or kept</p>
+      <div class="pair">
+        <div><div class="k">Money out</div>
+          <div class="big" style="font-size:24px;margin-top:3px">${money(m.spentMonthly)}</div>
+          <div class="sub">${money(m.spentMonthly*12)} a year · ${Math.round(pc(m.spentMonthly))}% of income</div></div>
+        <div><div class="k">Money kept</div>
+          <div class="big" style="font-size:24px;margin-top:3px;color:var(--good)">${money(m.keptMonthly + Math.max(m.leftOver,0))}</div>
+          <div class="sub">${money((m.keptMonthly + Math.max(m.leftOver,0))*12)} a year · ${Math.round(pc(m.keptMonthly + Math.max(m.leftOver,0)))}% of income</div></div>
+      </div>
+      <p class="hint">Investing is not an outgoing — the money is still yours. Kept is
+      ${money(m.keptMonthly)} a month invested plus ${money(Math.max(m.leftOver,0))} unallocated.</p>
     </section>`;
 
     if(nw>0){
@@ -1193,7 +1252,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '28 Oct 08:35';
+const BUILD = '28 Oct 09:21';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
