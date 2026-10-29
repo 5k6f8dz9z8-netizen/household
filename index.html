@@ -562,7 +562,8 @@ function model(){
   for(let i=0;i<12;i++){
     const dt=new Date(now.getFullYear(), now.getMonth()+i, 1);
     year.push({key:`${dt.getFullYear()}-${pad(dt.getMonth()+1)}`,
-               label:dt.toLocaleDateString('en-GB',{month:'short'}), total:0});
+               label:dt.toLocaleDateString('en-GB',{month:'short'}),
+               total:0, regular:0, irregular:0});
   }
   const endKey = year[11].key;
   const yearUnplaced = [];
@@ -571,14 +572,14 @@ function model(){
     const f = freqOf(b.frequency);
     if(f.perMonth >= 1){                       // weekly .. monthly: every month
       const each = perMonth(b);
-      year.forEach(y => { y.total += each; });
+      year.forEach(y => { y.total += each; y.regular += each; });
       return;
     }
     if(!b.nextDue){ yearUnplaced.push(b); return; }   // quarterly/annual, no date
     let dd = b.nextDue, g = 0;
     while(dd && dd.slice(0,7) <= endKey && g++ < 400){
       const r = year.find(y => y.key === dd.slice(0,7));
-      if(r) r.total += Number(b.amount)||0;
+      if(r){ const amt = Number(b.amount)||0; r.total += amt; r.irregular += amt; }
       dd = advance(dd, b.frequency);
     }
   });
@@ -587,16 +588,23 @@ function model(){
   const yearLow  = Math.min(...year.map(y=>y.total));
   const yearVaries = (yearHigh - yearLow) > 1;
 
+  /* A sinking fund smooths the bills that do NOT arrive every month. Running it
+     over everything just returns the whole budget, which tells you nothing. */
   let sinking = null;
-  const yearTotal = year.reduce((s,m)=>s+m.total,0);
-  if(yearTotal>0){
-    let cum=0, need2=0;
-    year.forEach((m,i)=>{ cum+=m.total; const req=cum/(i+1); if(req>need2) need2=req; });
-    const avg = yearTotal/12;
-    let bal=0, worst=0;
-    year.forEach(m=>{ bal += avg-m.total; if(bal<worst) worst=bal; });
-    const biggest = year.reduce((a,b)=> b.total>a.total?b:a, year[0]);
-    sinking = {need:need2, avg, biggest, buffer:-worst};
+  const irregularTotal = year.reduce((t,m)=>t+m.irregular, 0);
+  if(irregularTotal > 0){
+    let cum = 0, need = 0, peak = year[0];
+    year.forEach((m,i)=>{
+      cum += m.irregular;
+      const req = cum/(i+1);
+      if(req > need) need = req;
+      if(m.irregular > peak.irregular) peak = m;
+    });
+    const avg = irregularTotal/12;
+    let bal = 0, worst = 0;
+    year.forEach(m=>{ bal += avg - m.irregular; if(bal < worst) worst = bal; });
+    sinking = {need, avg, peak, buffer:-worst, total:irregularTotal,
+               count: bills.filter(b=>freqOf(b.frequency).perMonth < 1 && b.nextDue).length};
   }
 
   const changed = bills.map(b=>({b,c:priceChange(b)})).filter(x=>x.c);
@@ -850,8 +858,8 @@ function donut(parts, total){
     </div></div>`;
 }
 
-function barChart(rows, refLine){
-  const W=320, H=142, pl=40, pb=20;
+function barChart(rows, refLine, refLabel){
+  const W=320, H=150, pl=44, pb=20;
   const max = Math.max(...rows.map(r=>r.total), refLine||0, 1);
   const bw = (W-pl)/rows.length;
   let bars='', labels='', grid='';
@@ -861,23 +869,31 @@ function barChart(rows, refLine){
              <text x="${pl-7}" y="${y+3}" text-anchor="end">${money(max*f)}</text>`;
   });
   rows.forEach((r,i)=>{
-    const h = (r.total/max)*(H-pb);
-    const x = pl + i*bw + bw*0.18, w = bw*0.64, y = H-pb-h;
-    const over = refLine && r.total > refLine;
-    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}"
-      height="${Math.max(h,0).toFixed(1)}" rx="1"
-      fill="${over?'var(--alert)':'var(--accent)'}" opacity="${over?1:.75}">
-      <title>${esc(r.label)}: ${money(r.total)}</title></rect>`;
+    const x = pl + i*bw + bw*0.18, w = bw*0.64;
+    const hReg = ((r.regular ?? r.total)/max)*(H-pb);
+    const hIrr = ((r.irregular ?? 0)/max)*(H-pb);
+    bars += `<rect x="${x.toFixed(1)}" y="${(H-pb-hReg).toFixed(1)}" width="${w.toFixed(1)}"
+        height="${Math.max(hReg,0).toFixed(1)}" fill="var(--accent)" opacity=".55">
+        <title>${esc(r.label)} regular: ${money(r.regular ?? r.total)}</title></rect>`;
+    if(hIrr > 0){
+      bars += `<rect x="${x.toFixed(1)}" y="${(H-pb-hReg-hIrr).toFixed(1)}" width="${w.toFixed(1)}"
+        height="${hIrr.toFixed(1)}" rx="1" fill="var(--warn)">
+        <title>${esc(r.label)} irregular: ${money(r.irregular)}</title></rect>`;
+    }
     if(i%2===0) labels += `<text x="${(pl+i*bw+bw/2).toFixed(1)}" y="${H-5}" text-anchor="middle">${esc(r.label)}</text>`;
   });
-  const refY = refLine ? (H-pb-(refLine/max)*(H-pb)).toFixed(1) : 0;
-  const ref = refLine ? `<line x1="${pl}" y1="${refY}" x2="${W}" y2="${refY}"
-    stroke="var(--warn)" stroke-dasharray="3 3"/>` : '';
+  let ref = '';
+  if(refLine){
+    const y = (H-pb-(refLine/max)*(H-pb)).toFixed(1);
+    ref = `<line x1="${pl}" y1="${y}" x2="${W}" y2="${y}" stroke="var(--good)" stroke-dasharray="3 3"/>`;
+    if(refLabel) ref += `<text x="${W}" y="${(Number(y)-4).toFixed(1)}" text-anchor="end"
+      fill="var(--good)">${esc(refLabel)}</text>`;
+  }
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
-    aria-label="Bills due each month over the next year">${grid}${bars}${ref}${labels}</svg>`;
+    aria-label="Money leaving each month over the next year">${grid}${bars}${ref}${labels}</svg>`;
 }
 
-/* ---------- what needs acting on ---------- */
+/* ---------- what needs acting on ---------- *//* ---------- what needs acting on ---------- */
 function attention(m){
   const out = [];
   m.renewals.filter(b=>b.actIn!==null && b.actIn<=(b.major?180:60) && b.renewsIn>-180).forEach(b=>{
@@ -1115,26 +1131,35 @@ function pageBills(m){
         <p class="hint">Wants are ${Math.round((m.want/nw)*100)}% of committed spending — the part you could move if you had to.</p></section>`;
     }
 
-    if(m.sinking && m.yearVaries){
+    if(m.sinking){
       html += `<section><p class="title">Sinking fund<span class="right">${money(m.sinking.need)}/mth</span></p>
-        <p class="hint" style="margin-top:0">Bills do not arrive evenly, so paying in the average leaves you
-          short in the expensive months. This is the flat amount that covers every month of the next year even
-          starting from nothing.
-          ${m.sinking.need-m.sinking.avg>1?`It is ${money(m.sinking.need-m.sinking.avg)} above the plain average because ${esc(m.sinking.biggest.label)} takes ${money(m.sinking.biggest.total)}.`:''}</p>
+        <p class="hint" style="margin-top:0">Covers only the ${m.sinking.count} bill${m.sinking.count===1?'':'s'}
+          that do not arrive every month — ${money(m.sinking.total)} a year in all, the biggest being
+          ${money(m.sinking.peak.irregular)} in ${esc(m.sinking.peak.label)}. Set this aside monthly and the pot
+          covers each one as it lands, starting from empty. Your regular monthly bills are not included:
+          they need no smoothing.</p>
         <div class="pair" style="margin-top:12px">
-          <div><div class="k">Plain average</div><div class="big" style="font-size:24px;margin-top:3px">${money(m.sinking.avg)}</div></div>
-          <div><div class="k">Buffer needed</div><div class="big" style="font-size:24px;margin-top:3px">${money(m.sinking.buffer)}</div></div>
-        </div></section>`;
+          <div><div class="k">Plain average</div><div class="big" style="font-size:24px;margin-top:3px">${money(m.sinking.avg)}</div>
+            <div class="sub">${money(m.sinking.total)} ÷ 12</div></div>
+          <div><div class="k">Buffer needed</div><div class="big" style="font-size:24px;margin-top:3px">${money(m.sinking.buffer)}</div>
+            <div class="sub">if paying the average</div></div>
+        </div>
+        <p class="hint">Paying in the plain average works too, as long as the pot already holds
+          ${money(m.sinking.buffer)} before the first big one lands.</p></section>`;
     }
 
     html += `<section><p class="title">The year ahead<span class="right">${
         m.yearVaries ? money(m.yearHigh)+' peak' : 'flat'}</span></p>`;
 
     if(m.yearVaries){
-      html += `${barChart(m.year, m.contribTotal)}
-        <p class="hint">Money actually leaving each month. The dashed line is what you both pay into the
-        joint account — bars above it are the months that catch people out. Between the quietest and the
-        busiest month there is ${money(m.yearHigh - m.yearLow)} of difference.</p>`;
+      html += `${barChart(m.year, m.income, 'income')}
+        <p class="hint">
+          <i class="dot" style="background:var(--accent);opacity:.55"></i>Regular monthly bills ·
+          <i class="dot" style="background:var(--warn)"></i>Irregular ones landing that month.
+          The dashed line is your income. ${esc(m.yearHigh > m.income
+            ? money(m.yearHigh - m.income) + ' more goes out than comes in in the worst month.'
+            : 'Every month stays within what comes in.')}
+          Between the quietest and busiest month there is ${money(m.yearHigh - m.yearLow)} of difference.</p>`;
     } else {
       html += `<div class="note">
         <p style="margin:0 0 9px">Every month costs the same, so there is nothing to plot yet.</p>
@@ -1377,7 +1402,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '28 Oct 16:27';
+const BUILD = '29 Oct 15:11';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
