@@ -430,6 +430,7 @@ const DEFAULT_DATA = {
   contributions: [],
   bills: [],
   deliveries: [],
+  tank: {capacity:2447, height:1320, shape:'horizontal', level:0, checked:''},
 };
 
 const GROUPS = [
@@ -445,6 +446,27 @@ const pad = (n) => String(n).padStart(2,'0');
 const uid = () => 'x' + Math.random().toString(36).slice(2,9);
 const freqOf = (id) => FREQ.find(f=>f.id===id) || FREQ[3];
 const catOf  = (id) => CATS.find(c=>c.id===id) || CATS[CATS.length-1];
+
+/* Oil tanks are round in section and lie on their side, so the gauge reading is
+   not the volume: a quarter of the way up holds about a fifth of the oil, and
+   the error peaks near 20% and 80%. The filled fraction of a horizontal tank of
+   circular OR elliptical section is the same function of depth — the width
+   cancels when you normalise — so only the height and capacity are needed. */
+const TANK_SHAPES = [
+  ['horizontal', 'Round, lying down'],
+  ['linear',     'Square or upright'],
+];
+const TANK_DEFAULT = {capacity:2447, height:1320, shape:'horizontal', level:0, checked:''};
+
+function tankFraction(level, shape){
+  const x = Math.max(0, Math.min(1, Number(level)||0));
+  if(shape === 'linear') return x;
+  const h = x * 2;                       // depth, in units of the radius
+  if(h <= 0) return 0;
+  if(h >= 2) return 1;
+  const d = 1 - h;
+  return (Math.acos(d) - d*Math.sqrt(1 - d*d)) / Math.PI;
+}
 
 /* A bill is on a fixed term with an end date, on a rolling arrangement with
    no end date at all (council tax, a subscription kept month to month), or
@@ -584,6 +606,47 @@ function model(){
     }
   });
 
+  /* A float is a starting position, not a running balance — one number, typed
+     occasionally. Projected forward it answers the only question that matters:
+     does the joint account survive the lumpy months, and for how long. */
+  const jointFloat = Number(d.jointFloat) || 0;
+  let floatRun = null;
+  if(jointFloat > 0 && contribTotal > 0){
+    const MONTHS = 36;
+    const out = [];
+    for(let i=0;i<MONTHS;i++){
+      const dt = new Date(now.getFullYear(), now.getMonth()+i, 1);
+      out.push({key:`${dt.getFullYear()}-${pad(dt.getMonth()+1)}`,
+                label: dt.toLocaleDateString('en-GB',{month:'short', year:'2-digit'}), out:0});
+    }
+    const lastKey = out[MONTHS-1].key;
+    bills.filter(b=>b.joint).forEach(b=>{
+      const f = freqOf(b.frequency);
+      if(f.perMonth >= 1){ const each = perMonth(b); out.forEach(o=>{ o.out += each; }); return; }
+      if(!b.nextDue) return;
+      let dd = b.nextDue, g = 0;
+      while(dd && dd.slice(0,7) <= lastKey && g++ < 600){
+        const r = out.find(o=>o.key === dd.slice(0,7));
+        if(r) r.out += Number(b.amount)||0;
+        dd = advance(dd, b.frequency);
+      }
+    });
+    let bal = jointFloat, low = {bal: jointFloat, label: 'now'}, empty = null;
+    const path = [];
+    out.forEach((o,i)=>{
+      bal += contribTotal - o.out;
+      path.push({label:o.label, bal});
+      /* The low point is only meaningful over a year. Tracking it across the
+         whole projection just reports the deepest point of an overdraft that
+         would never be allowed to happen. */
+      if(i < 12 && bal < low.bal) low = {bal, label:o.label};
+      if(bal < 0 && !empty) empty = o.label;
+    });
+    const drift = (contribTotal*12 - out.slice(0,12).reduce((t,o)=>t+o.out,0)) / 12;
+    floatRun = {start:jointFloat, path, low, empty, drift,
+                monthsOfCover: drift < 0 ? jointFloat / -drift : null};
+  }
+
   const yearHigh = Math.max(...year.map(y=>y.total));
   const yearLow  = Math.min(...year.map(y=>y.total));
   const yearVaries = (yearHigh - yearLow) > 1;
@@ -646,9 +709,25 @@ function model(){
     }
   });
 
+  /* What is actually in the tank, from an indicative gauge reading. */
+  const tankCfg = {...TANK_DEFAULT, ...(d.tank||{})};
+  let tank = null;
+  if(tankCfg.capacity > 0){
+    const frac = tankFraction(tankCfg.level, tankCfg.shape);
+    const litres = tankCfg.capacity * frac;
+    const oil = kinds.find(k => /oil/i.test(k.kind));
+    const unit = oil && oil.perUnit > 0 ? oil.perUnit : 0;
+    const burn = (fuelForecast(kinds, bills).find(f => /oil/i.test(f.kind))||{}).qtyPerMonth || 0;
+    tank = {...tankCfg, frac, litres, value: litres*unit, unit,
+            depth: tankCfg.height * (Number(tankCfg.level)||0),
+            monthsLeft: burn > 0 ? litres/burn : null,
+            refill: (tankCfg.capacity - litres) * unit};
+  }
+
   return {incomes, income, bills, billsMonthly, jointMonthly, contributions, contribTotal,
           leftOver, perPerson, need, want, byGroup, renewals, year, sinking, priceRises,
           keptMonthly, spentMonthly, yearUnplaced, yearVaries, yearHigh, yearLow,
+          jointFloat, floatRun, tank,
           deliveries, kinds, review, reviewTotal, rolling, dates, fuel: fuelForecast(kinds, bills)};
 
 }
@@ -858,6 +937,38 @@ function donut(parts, total){
     </div></div>`;
 }
 
+function tankArt(t){
+  const W=320, H=132;
+  const bx=8, by=14, bw=196, bh=100, r=16;           // side elevation
+  const cx=262, cy=by+bh/2, cr=bh/2;                 // end section
+  const fillY = by + bh*(1 - Math.max(0, Math.min(1, Number(t.level)||0)));
+  const ribs = [0.18,0.33,0.48,0.63,0.78].map(f =>
+    `<line x1="${(bx+bw*f).toFixed(1)}" y1="${by+7}" x2="${(bx+bw*f).toFixed(1)}" y2="${by+bh-7}"
+       stroke="var(--rule)" stroke-width="1.5"/>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img"
+      aria-label="Tank filled to ${Math.round((Number(t.level)||0)*100)}% of its height">
+    <defs>
+      <clipPath id="tkSide"><rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="${r}"/></clipPath>
+      <clipPath id="tkEnd"><circle cx="${cx}" cy="${cy}" r="${cr}"/></clipPath>
+    </defs>
+    <g clip-path="url(#tkSide)">
+      <rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="var(--sunk)"/>
+      <rect x="${bx}" y="${fillY.toFixed(1)}" width="${bw}" height="${(by+bh-fillY).toFixed(1)}" fill="var(--warn)" opacity=".85"/>
+    </g>
+    <rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="${r}" fill="none" stroke="var(--ink-3)" stroke-width="1.5"/>
+    ${ribs}
+    <g clip-path="url(#tkEnd)">
+      <circle cx="${cx}" cy="${cy}" r="${cr}" fill="var(--sunk)"/>
+      <rect x="${cx-cr}" y="${fillY.toFixed(1)}" width="${cr*2}" height="${(by+bh-fillY).toFixed(1)}" fill="var(--warn)" opacity=".85"/>
+    </g>
+    <circle cx="${cx}" cy="${cy}" r="${cr}" fill="none" stroke="var(--ink-3)" stroke-width="1.5"/>
+    <line x1="${bx-4}" y1="${fillY.toFixed(1)}" x2="${cx+cr+4}" y2="${fillY.toFixed(1)}"
+      stroke="var(--ink)" stroke-dasharray="3 3" stroke-width="1"/>
+    <text x="${bx+4}" y="${H-4}" style="font-family:var(--mono);font-size:9px;fill:var(--ink-3)">side</text>
+    <text x="${cx-10}" y="${H-4}" style="font-family:var(--mono);font-size:9px;fill:var(--ink-3)">end</text>
+  </svg>`;
+}
+
 function barChart(rows, refLine, refLabel){
   const W=320, H=150, pl=44, pb=20;
   const max = Math.max(...rows.map(r=>r.total), refLine||0, 1);
@@ -978,6 +1089,31 @@ function pageMonth(m){
   } else {
     html += `<section><p class="title">Needs attention</p>
       <div class="note">Nothing to act on. No contract is inside its warning window and your shares cover the joint bills.</div></section>`;
+  }
+
+  if(m.floatRun){
+    const f = m.floatRun;
+    const tone = f.empty ? 'var(--alert)' : f.low.bal < 500 ? 'var(--warn)' : 'var(--good)';
+    html += `<section><p class="title">Joint account<span class="right">${money(f.start)} today</span></p>
+      <div class="hero" style="padding:16px">
+        <div class="k">Lowest in the next year</div>
+        <div class="figure" style="font-size:40px;color:${tone}">${money(f.low.bal)}</div>
+        <div class="figure-note">${f.low.label === 'now'
+          ? 'It never dips below where it is now.'
+          : `in ${esc(f.low.label)}${f.empty ? '' : ', then it recovers'}.`}</div>
+        ${f.empty ? `<div class="meta" style="margin-top:12px">
+            <span>Runs dry</span><span class="mono" style="color:var(--alert)">${esc(f.empty)}</span></div>` : ''}
+        <div class="meta"><span>${f.drift >= 0 ? 'Building up by' : 'Draining by'}</span>
+          <span class="mono" style="color:${f.drift >= 0 ? 'var(--good)' : 'var(--alert)'}">${
+            money(Math.abs(f.drift))} a month</span></div>
+      </div>
+      <p class="hint">${f.empty
+        ? `At ${money(Math.abs(f.drift))} a month short, the float is a countdown rather than a cushion. Raising
+           what you both pay in by ${money(Math.abs(f.drift))} would hold it steady.`
+        : f.drift >= 0
+          ? 'Contributions cover the bills across the year, including the lumpy months.'
+          : 'It holds up over the next three years, but it is slowly draining.'}</p>
+    </section>`;
   }
 
   html += `<section><p class="title">Each of you</p><div class="list">
@@ -1145,7 +1281,12 @@ function pageBills(m){
             <div class="sub">if paying the average</div></div>
         </div>
         <p class="hint">Paying in the plain average works too, as long as the pot already holds
-          ${money(m.sinking.buffer)} before the first big one lands.</p></section>`;
+          ${money(m.sinking.buffer)} before the first big one lands.${
+            m.jointFloat >= m.sinking.buffer
+              ? ` Your ${money(m.jointFloat)} float already covers that, so the average is enough.`
+              : m.jointFloat > 0
+                ? ` Your ${money(m.jointFloat)} float is ${money(m.sinking.buffer - m.jointFloat)} short of it.`
+                : ''}</p></section>`;
     }
 
     html += `<section><p class="title">The year ahead<span class="right">${
@@ -1178,6 +1319,41 @@ function pageBills(m){
     }
 
     html += `</section>`;
+
+    if(m.tank){
+      const t = m.tank;
+      const pc = Math.round(t.frac*100);
+      const lvl = Math.round((Number(t.level)||0)*100);
+      html += `<section><p class="title">In the tank<span class="right">${
+        t.checked ? 'read ' + dateShort(t.checked) : 'not read yet'}</span></p>
+        ${tankArt(t)}
+        <div style="margin-top:10px">
+          <label class="k" for="tk_level">Gauge — how far up the tank</label>
+          <input type="range" id="tk_level" min="0" max="100" step="1" value="${lvl}">
+          <div class="meta" style="margin-top:-2px"><span>empty</span>
+            <span class="mono" id="tk_level_v">${lvl}% up · ${Math.round(t.depth)} mm</span>
+            <span>full</span></div>
+        </div>
+        <div class="pair" style="margin-top:12px">
+          <div><div class="k">In there</div>
+            <div class="big" style="font-size:24px;margin-top:3px" id="tk_litres">${Math.round(t.litres)} L</div>
+            <div class="sub" id="tk_pc">${pc}% of ${t.capacity} L</div></div>
+          <div><div class="k">${t.unit>0?'Worth about':'Room left'}</div>
+            <div class="big" style="font-size:24px;margin-top:3px" id="tk_value">${
+              t.unit>0 ? money(t.value) : Math.round(t.capacity-t.litres)+' L'}</div>
+            <div class="sub" id="tk_sub">${t.unit>0
+              ? 'at '+(t.unit*100).toFixed(1)+'p a litre'
+              : 'to fill it'}</div></div>
+        </div>
+        <p class="hint" id="tk_note">${
+          t.monthsLeft !== null && t.litres > 0
+            ? `About ${t.monthsLeft < 1 ? 'under a month' : t.monthsLeft.toFixed(1)+' months'} left at your usual ${Math.round(t.litres/Math.max(t.monthsLeft,0.01))} L a month.`
+            : 'Log a couple of deliveries and this will also estimate how long it lasts.'}
+          ${t.shape==='horizontal' ? ` The tank is round in section, so the gauge is not the volume — ${
+            lvl}% up the side is ${pc}% of the oil.` : ''}</p>
+        ${EDIT ? '' : '<p class="hint" style="color:var(--ink-3)">Drag to check a reading. Turn on Edit to record it.</p>'}
+      </section>`;
+    }
 
     m.fuel.forEach(f=>{
       const basis = f.fullYear ? 'last 12 months' : `${f.historyMonths.toFixed(1)} months of records`;
@@ -1346,6 +1522,15 @@ function pageSetup(m){
         <span class="main"><span class="t">${esc(c.person)}</span><span class="s">every month</span></span>
         <span class="amt">${money(c.amount,2)}</span></${EDIT?'button':'div'}>`).join('')}
     </div>
+    <div class="list" style="margin-top:10px">
+      <${EDIT?'button':'div'} class="row" ${EDIT?'data-edit="float"':''}>
+        <span class="main"><span class="t">Joint account float</span>
+          <span class="s">${m.jointFloat>0 ? 'roughly what sits in there' : EDIT ? 'tap to set' : 'not set'}</span></span>
+        <span class="amt${m.jointFloat>0?'':' muted'}">${m.jointFloat>0?money(m.jointFloat):'—'}</span>
+      </${EDIT?'button':'div'}>
+    </div>
+    <p class="hint">A rough starting figure, not a running balance — round it off and revisit it
+    a couple of times a year. It is only used to project how the account copes with the lumpy months.</p>
     <div class="note" style="margin-top:12px;color:${gap<0?'var(--alert)':'var(--ink-2)'}">
       ${gap<0 ? `${money(-gap)} a month short of the ${money(m.jointMonthly)} of joint bills.`
               : `${money(gap)} a month spare against ${money(m.jointMonthly)} of joint bills.`}
@@ -1374,6 +1559,11 @@ function pageSetup(m){
       <div class="row"><span class="main"><span class="t">Bills</span></span><span class="amt muted">${m.bills.length}</span></div>
       <div class="row"><span class="main"><span class="t">Income sources</span></span><span class="amt muted">${m.incomes.length}</span></div>
       <div class="row"><span class="main"><span class="t">Deliveries</span></span><span class="amt muted">${m.deliveries.length}</span></div>
+      <button class="row" ${EDIT?'data-edit="tank"':''} ${EDIT?'':'style="cursor:default"'}>
+        <span class="main"><span class="t">Oil tank</span>
+          <span class="s">${m.tank ? m.tank.capacity + ' L · ' + m.tank.height + ' mm tall' : 'not set'}</span></span>
+        ${EDIT?'<span class="amt" style="color:var(--accent)">edit</span>':''}
+      </button>
       <button class="row" id="csvbtn"><span class="main"><span class="t" style="color:var(--accent)">Export everything as a spreadsheet</span></span></button>
     </div></section>
 
@@ -1402,7 +1592,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '29 Oct 15:11';
+const BUILD = '29 Oct 15:42';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
@@ -1766,6 +1956,23 @@ function editPerson(i){
     DATA.people = people;
   });
 }
+function editTank(){
+  const t = {...TANK_DEFAULT, ...(DATA.tank||{})};
+  openSheet('Oil tank',
+    group(field('Usable capacity (L)','tkcap', t.capacity) +
+          field('Height (mm)','tkh', t.height) +
+          select('Section','tkshape', t.shape, TANK_SHAPES),
+      'From the plate on the tank'),
+    () => {
+      DATA.tank = {...t, capacity:num('tkcap'), height:num('tkh'), shape:val('tkshape')};
+    });
+}
+function editFloat(){
+  openSheet('Joint account float',
+    group(field('Amount','jfloat', DATA.jointFloat || ''),
+      'Roughly what is in the joint account today'),
+    () => { DATA.jointFloat = num('jfloat'); });
+}
 function editContrib(name){
   const c = (DATA.contributions||[]).find(x=>x.person===name) || {person:name, amount:0};
   openSheet(name + "'s share", group(field('Into joint account','amount',c.amount)),
@@ -1856,6 +2063,37 @@ function render(){
   const lock = document.getElementById('lockbtn');
   if(lock) lock.onclick = () => { forgetKey(); location.reload(); };
 
+  const tk = document.getElementById('tk_level');
+  if(tk && m.tank){
+    const t = m.tank;
+    const art = tk.closest('section').querySelector('svg');
+    tk.oninput = () => {
+      const lvl = Number(tk.value)/100;
+      const frac = tankFraction(lvl, t.shape);
+      const litres = t.capacity * frac;
+      const set = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+      set('tk_level_v', Math.round(lvl*100) + '% up · ' + Math.round(t.height*lvl) + ' mm');
+      set('tk_litres', Math.round(litres) + ' L');
+      set('tk_pc', Math.round(frac*100) + '% of ' + t.capacity + ' L');
+      set('tk_value', t.unit>0 ? money(litres*t.unit) : Math.round(t.capacity-litres) + ' L');
+      if(art){
+        const fillY = 14 + 100*(1-lvl);
+        art.querySelectorAll('rect[fill="var(--warn)"]').forEach(r2=>{
+          r2.setAttribute('y', fillY.toFixed(1));
+          r2.setAttribute('height', (114-fillY).toFixed(1));
+        });
+        const line = art.querySelector('line[stroke-dasharray]');
+        if(line){ line.setAttribute('y1', fillY.toFixed(1)); line.setAttribute('y2', fillY.toFixed(1)); }
+      }
+      if(EDIT){
+        DATA.tank = {...t, level: lvl, checked: todayISO()};
+        delete DATA.tank.frac; delete DATA.tank.litres; delete DATA.tank.value;
+        delete DATA.tank.depth; delete DATA.tank.monthsLeft; delete DATA.tank.refill; delete DATA.tank.unit;
+        dirty = true;
+      }
+    };
+  }
+
   const scOut = document.getElementById('sc_out');
   if(scOut){
     const people = [...document.querySelectorAll('[data-person]')];
@@ -1928,6 +2166,8 @@ function render(){
       else if(k==='income') editIncome(id);
       else if(k==='delivery') editDelivery(id);
       else if(k==='contrib') editContrib(id);
+      else if(k==='float') editFloat();
+      else if(k==='tank') editTank();
       else if(k==='person') editPerson(Number(id));
       else if(k==='new-bill') newBill();
       else if(k==='new-income') newIncome();
