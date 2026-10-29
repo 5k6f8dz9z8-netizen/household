@@ -556,8 +556,11 @@ function model(){
   const perPerson = (d.people||[]).map(name=>{
     const inc = incomes.filter(i=>i.person===name).reduce((s,i)=>s+perMonth(i),0);
     const contrib = Number((contributions.find(c=>c.person===name)||{}).amount)||0;
-    const own = bills.filter(b=>!b.joint && b.person===name).reduce((s,b)=>s+perMonth(b),0);
-    return {name, income:inc, contrib, own, left: inc-contrib-own};
+    const mine = bills.filter(b=>!b.joint && b.person===name);
+    const investing = mine.filter(b=>(b.group||'household')==='savings').reduce((s,b)=>s+perMonth(b),0);
+    const spending  = mine.filter(b=>(b.group||'household')!=='savings').reduce((s,b)=>s+perMonth(b),0);
+    const own = investing + spending;
+    return {name, income:inc, contrib, own, investing, spending, left: inc-contrib-own};
   });
 
   let need=0, want=0;
@@ -915,8 +918,10 @@ function keyList(segs, total){
     <span class="vl"${s.tone?` style="color:${s.tone}"`:''}>${M(s.value)}</span></li>`).join('')}</ul>`;
 }
 
-function donut(parts, total){
-  const size=168, stroke=30, r=(size-stroke)/2, C=2*Math.PI*r;
+function donut(parts, total, opts){
+  const o = opts || {};
+  const size = o.size || 168, stroke = o.stroke || 30;
+  const r = (size-stroke)/2, C = 2*Math.PI*r;
   let off=0, arcs='';
   parts.filter(p=>p.value>0).forEach(p=>{
     const frac = p.value/Math.max(total,1);
@@ -928,11 +933,12 @@ function donut(parts, total){
   return `<div style="display:flex;justify-content:center;padding:4px 0 2px">
     <div style="position:relative;width:${size}px;height:${size}px">
       <svg width="${size}" height="${size}" style="transform:rotate(-90deg)"
-        role="img" aria-label="Share of committed spending by type">${arcs}</svg>
+        role="img" aria-label="${esc(o.aria || 'Share of committed spending by type')}">${arcs}</svg>
       <div style="position:absolute;inset:0;display:grid;place-content:center;text-align:center">
-        <div class="k">Total</div>
-        <div style="font-family:var(--display);font-size:25px;font-weight:300;letter-spacing:-.6px;margin-top:1px">${money(total)}</div>
-        <div class="sub">a month</div>
+        <div class="k">${esc(o.label || 'Total')}</div>
+        <div style="font-family:var(--display);font-size:${size < 160 ? 21 : 25}px;font-weight:300;
+          letter-spacing:-.6px;margin-top:1px;${o.tone ? 'color:'+o.tone : ''}">${o.value || money(total)}</div>
+        <div class="sub">${esc(o.sub || 'a month')}</div>
       </div>
     </div></div>`;
 }
@@ -1193,7 +1199,7 @@ function scenarioOut(m){
 /* ---------- Bills ---------- */
 function pageBills(m){
   let html = `<div class="seg" role="group" aria-label="View">
-    ${[['overview','Overview'],['list','All bills'],['contracts','Contracts']].map(([k,l])=>
+    ${[['overview','Overview'],['list','Bills'],['contracts','Contracts'],['oil','Oil']].map(([k,l])=>
       `<button data-bview="${k}" aria-pressed="${billView===k}">${l}</button>`).join('')}
   </div>`;
 
@@ -1256,6 +1262,46 @@ function pageBills(m){
       <p class="hint">Investing is not an outgoing — the money is still yours. Kept is
       ${money(m.keptMonthly)} a month invested plus ${money(Math.max(m.leftOver,0))} unallocated.</p>
     </section>`;
+
+    /* The household view hides who is actually carrying what, so each person
+       gets the same breakdown against their own income. */
+    const PCOL = {joint:'var(--accent)', spending:'var(--warn)',
+                  investing:'var(--good)', left:'var(--ink-3)'};
+    m.perPerson.filter(p=>p.income>0).forEach(p=>{
+      const parts = [
+        {name:'To joint bills',    value:p.contrib,   color:PCOL.joint},
+        {name:'Personal spending', value:p.spending,  color:PCOL.spending},
+        {name:'Investing',         value:p.investing, color:PCOL.investing},
+        {name:'Left over',         value:Math.max(p.left,0), color:PCOL.left},
+      ].filter(x=>x.value > 0);
+      const share = (v) => p.income > 0 ? Math.round((v/p.income)*100) : 0;
+      html += `<section>
+        <p class="title">${esc(p.name)}<span class="right">${money(p.income)}/mth</span></p>
+        ${donut(parts, p.income, {size:140, stroke:26, label:'Left over',
+          aria: p.name + "'s income, by where it goes",
+          value: money(p.left), sub:'a month',
+          tone: p.left < 0 ? 'var(--alert)' : 'var(--good)'})}
+        <div class="brk-head" style="margin-top:4px">
+          <span class="brk-n"></span><span class="brk-v">a month</span>
+          <span class="brk-v">a year</span><span class="brk-p">share</span>
+        </div>
+        ${parts.map(x=>`<div class="brk">
+            <span class="brk-n"><i class="dot" style="background:${x.color}"></i>${esc(x.name)}</span>
+            <span class="brk-v">${money(x.value)}</span>
+            <span class="brk-v">${money(x.value*12)}</span>
+            <span class="brk-p">${share(x.value)}%</span>
+          </div>`).join('')}
+        <div class="brk sum">
+          <span class="brk-n">Income</span>
+          <span class="brk-v">${money(p.income)}</span>
+          <span class="brk-v">${money(p.income*12)}</span>
+          <span class="brk-p">100%</span>
+        </div>
+        ${p.left < 0 ? `<p class="hint" style="color:var(--alert)">${esc(p.name)} is committing
+          ${money(-p.left)} a month more than comes in.</p>` : ''}
+      </section>`;
+    });
+
 
     if(nw>0){
       html += `<section><p class="title">Needs vs wants</p>
@@ -1320,80 +1366,89 @@ function pageBills(m){
 
     html += `</section>`;
 
-    if(m.tank){
-      const t = m.tank;
-      const pc = Math.round(t.frac*100);
-      const lvl = Math.round((Number(t.level)||0)*100);
-      html += `<section><p class="title">In the tank<span class="right">${
-        t.checked ? 'read ' + dateShort(t.checked) : 'not read yet'}</span></p>
-        ${tankArt(t)}
-        <div style="margin-top:10px">
-          <label class="k" for="tk_level">Gauge — how far up the tank</label>
-          <input type="range" id="tk_level" min="0" max="100" step="1" value="${lvl}">
-          <div class="meta" style="margin-top:-2px"><span>empty</span>
-            <span class="mono" id="tk_level_v">${lvl}% up · ${Math.round(t.depth)} mm</span>
-            <span>full</span></div>
-        </div>
-        <div class="pair" style="margin-top:12px">
-          <div><div class="k">In there</div>
-            <div class="big" style="font-size:24px;margin-top:3px" id="tk_litres">${Math.round(t.litres)} L</div>
-            <div class="sub" id="tk_pc">${pc}% of ${t.capacity} L</div></div>
-          <div><div class="k">${t.unit>0?'Worth about':'Room left'}</div>
-            <div class="big" style="font-size:24px;margin-top:3px" id="tk_value">${
-              t.unit>0 ? money(t.value) : Math.round(t.capacity-t.litres)+' L'}</div>
-            <div class="sub" id="tk_sub">${t.unit>0
-              ? 'at '+(t.unit*100).toFixed(1)+'p a litre'
-              : 'to fill it'}</div></div>
-        </div>
-        <p class="hint" id="tk_note">${
-          t.monthsLeft !== null && t.litres > 0
-            ? `About ${t.monthsLeft < 1 ? 'under a month' : t.monthsLeft.toFixed(1)+' months'} left at your usual ${Math.round(t.litres/Math.max(t.monthsLeft,0.01))} L a month.`
-            : 'Log a couple of deliveries and this will also estimate how long it lasts.'}
-          ${t.shape==='horizontal' ? ` The tank is round in section, so the gauge is not the volume — ${
-            lvl}% up the side is ${pc}% of the oil.` : ''}</p>
-        ${EDIT ? '' : '<p class="hint" style="color:var(--ink-3)">Drag to check a reading. Turn on Edit to record it.</p>'}
-      </section>`;
+    return html;
+  }
+
+  if(billView==='oil'){
+    if(!m.tank && !m.deliveries.length){
+      return html + `<div class="empty"><h3>Nothing recorded</h3>
+        <p>Set your tank up in Setup and log a delivery, and this becomes a running picture of
+        what heating oil costs and how much is left.</p></div>`;
     }
+  if(m.tank){
+    const t = m.tank;
+    const pc = Math.round(t.frac*100);
+    const lvl = Math.round((Number(t.level)||0)*100);
+    html += `<section><p class="title">In the tank<span class="right">${
+      t.checked ? 'read ' + dateShort(t.checked) : 'not read yet'}</span></p>
+      ${tankArt(t)}
+      <div style="margin-top:10px">
+        <label class="k" for="tk_level">Gauge — how far up the tank</label>
+        <input type="range" id="tk_level" min="0" max="100" step="1" value="${lvl}">
+        <div class="meta" style="margin-top:-2px"><span>empty</span>
+          <span class="mono" id="tk_level_v">${lvl}% up · ${Math.round(t.depth)} mm</span>
+          <span>full</span></div>
+      </div>
+      <div class="pair" style="margin-top:12px">
+        <div><div class="k">In there</div>
+          <div class="big" style="font-size:24px;margin-top:3px" id="tk_litres">${Math.round(t.litres)} L</div>
+          <div class="sub" id="tk_pc">${pc}% of ${t.capacity} L</div></div>
+        <div><div class="k">${t.unit>0?'Worth about':'Room left'}</div>
+          <div class="big" style="font-size:24px;margin-top:3px" id="tk_value">${
+            t.unit>0 ? money(t.value) : Math.round(t.capacity-t.litres)+' L'}</div>
+          <div class="sub" id="tk_sub">${t.unit>0
+            ? 'at '+(t.unit*100).toFixed(1)+'p a litre'
+            : 'to fill it'}</div></div>
+      </div>
+      <p class="hint" id="tk_note">${
+        t.monthsLeft !== null && t.litres > 0
+          ? `About ${t.monthsLeft < 1 ? 'under a month' : t.monthsLeft.toFixed(1)+' months'} left at your usual ${Math.round(t.litres/Math.max(t.monthsLeft,0.01))} L a month.`
+          : 'Log a couple of deliveries and this will also estimate how long it lasts.'}
+        ${t.shape==='horizontal' ? ` The tank is round in section, so the gauge is not the volume — ${
+          lvl}% up the side is ${pc}% of the oil.` : ''}</p>
+      ${EDIT ? '' : '<p class="hint" style="color:var(--ink-3)">Drag to check a reading. Turn on Edit to record it.</p>'}
+    </section>`;
+  }
 
-    m.fuel.forEach(f=>{
-      const basis = f.fullYear ? 'last 12 months' : `${f.historyMonths.toFixed(1)} months of records`;
-      const vsBudget = f.budget > 0 ? f.costPerMonth - f.budget : null;
-      html += `<section><p class="title">${esc(f.kind)}<span class="right">${basis}</span></p>
-        <div class="pair">
-          <div><div class="k">Cost a month</div>
-            <div class="big" style="font-size:24px;margin-top:3px">${money(f.costPerMonth)}</div>
-            <div class="sub">${Math.round(f.qtyPerMonth)} ${esc(f.unit)} a month</div></div>
-          <div><div class="k">A typical fill</div>
-            <div class="big" style="font-size:24px;margin-top:3px">${money(f.estCost)}</div>
-            <div class="sub">${f.lastQty} ${esc(f.unit)} at last price</div></div>
-        </div>
-        ${vsBudget !== null ? `<div class="meta">
-          <span>Budgeted ${money(f.budget)} a month</span>
-          <span class="mono" style="color:${vsBudget > 0 ? 'var(--alert)' : 'var(--good)'}">
-            ${vsBudget > 0 ? money(vsBudget)+' over' : money(-vsBudget)+' under'}</span></div>` : ''}
-        <p class="hint">
-          Every delivery is spread over the months it covers, and the last load is counted as still
-          in the tank — so the quiet months since ${dateShort(f.lastDate)} pull the average down rather than being skipped.
-          ${f.deliveries > 1 ? `Across all ${f.historyMonths.toFixed(1)} months of records it works out at ${money(f.allCostPerMonth)} a month.` : ''}
-        </p></section>`;
-    });
+  m.fuel.forEach(f=>{
+    const basis = f.fullYear ? 'last 12 months' : `${f.historyMonths.toFixed(1)} months of records`;
+    const vsBudget = f.budget > 0 ? f.costPerMonth - f.budget : null;
+    html += `<section><p class="title">${esc(f.kind)}<span class="right">${basis}</span></p>
+      <div class="pair">
+        <div><div class="k">Cost a month</div>
+          <div class="big" style="font-size:24px;margin-top:3px">${money(f.costPerMonth)}</div>
+          <div class="sub">${Math.round(f.qtyPerMonth)} ${esc(f.unit)} a month</div></div>
+        <div><div class="k">A typical fill</div>
+          <div class="big" style="font-size:24px;margin-top:3px">${money(f.estCost)}</div>
+          <div class="sub">${f.lastQty} ${esc(f.unit)} at last price</div></div>
+      </div>
+      ${vsBudget !== null ? `<div class="meta">
+        <span>Budgeted ${money(f.budget)} a month</span>
+        <span class="mono" style="color:${vsBudget > 0 ? 'var(--alert)' : 'var(--good)'}">
+          ${vsBudget > 0 ? money(vsBudget)+' over' : money(-vsBudget)+' under'}</span></div>` : ''}
+      <p class="hint">
+        Every delivery is spread over the months it covers, and the last load is counted as still
+        in the tank — so the quiet months since ${dateShort(f.lastDate)} pull the average down rather than being skipped.
+        ${f.deliveries > 1 ? `Across all ${f.historyMonths.toFixed(1)} months of records it works out at ${money(f.allCostPerMonth)} a month.` : ''}
+      </p></section>`;
+  });
 
-    html += `<section><p class="title">Deliveries<span class="right">${m.deliveries.length}</span></p>
-      <div class="list">${m.deliveries.map(x=>{
-        const u = (Number(x.qty)||0)>0 ? (Number(x.cost)||0)/x.qty : 0;
-        const k = m.kinds.find(kk=>kk.kind===(x.kind||'Other'));
-        const vs = k && k.perUnit>0 ? ((u-k.perUnit)/k.perUnit)*100 : 0;
-        return `<${EDIT?'button':'div'} class="row" ${EDIT?`data-edit="delivery" data-id="${esc(x.id)}"`:''}>
-          <span class="main"><span class="t">${esc(x.kind)} · ${dateShort(x.date)}</span>
-            <span class="s">${esc(x.provider||'No supplier')} · ${x.qty} ${esc(x.unit)}${x.note?' · '+esc(x.note):''}</span></span>
-          <span class="col"><span class="amt">${money(x.cost)}</span>
-            <span class="s" style="color:${Math.abs(vs)<1?'var(--ink-3)':vs>0?'var(--alert)':'var(--good)'}">
-              ${u>=1?money(u,2):(u*100).toFixed(1)+'p'}/${esc((x.unit||'unit').replace(/s$/,''))}</span></span>
-        </${EDIT?'button':'div'}>`;
-      }).join('')}
-      ${EDIT?`<button class="row" data-edit="new-delivery"><span class="main">
-        <span class="t" style="color:var(--accent)">Log a delivery</span></span></button>`:''}</div>
-      <p class="hint">Each price against your own running average, so you can tell a good fill from a bad one.</p></section>`;
+  html += `<section><p class="title">Deliveries<span class="right">${m.deliveries.length}</span></p>
+    <div class="list">${m.deliveries.map(x=>{
+      const u = (Number(x.qty)||0)>0 ? (Number(x.cost)||0)/x.qty : 0;
+      const k = m.kinds.find(kk=>kk.kind===(x.kind||'Other'));
+      const vs = k && k.perUnit>0 ? ((u-k.perUnit)/k.perUnit)*100 : 0;
+      return `<${EDIT?'button':'div'} class="row" ${EDIT?`data-edit="delivery" data-id="${esc(x.id)}"`:''}>
+        <span class="main"><span class="t">${esc(x.kind)} · ${dateShort(x.date)}</span>
+          <span class="s">${esc(x.provider||'No supplier')} · ${x.qty} ${esc(x.unit)}${x.note?' · '+esc(x.note):''}</span></span>
+        <span class="col"><span class="amt">${money(x.cost)}</span>
+          <span class="s" style="color:${Math.abs(vs)<1?'var(--ink-3)':vs>0?'var(--alert)':'var(--good)'}">
+            ${u>=1?money(u,2):(u*100).toFixed(1)+'p'}/${esc((x.unit||'unit').replace(/s$/,''))}</span></span>
+      </${EDIT?'button':'div'}>`;
+    }).join('')}
+    ${EDIT?`<button class="row" data-edit="new-delivery"><span class="main">
+      <span class="t" style="color:var(--accent)">Log a delivery</span></span></button>`:''}</div>
+    <p class="hint">Each price against your own running average, so you can tell a good fill from a bad one.</p></section>`;
     return html;
   }
 
@@ -1592,7 +1647,7 @@ function pageSetup(m){
  * browser with PBKDF2; nothing readable exists until someone unlocks it.
  * ------------------------------------------------------------------ */
 
-const BUILD = '29 Oct 15:42';
+const BUILD = '29 Oct 16:08';
 const KEY_STORE = 'household:key:v1';
 let CRYPTO = null;              // {key, salt, iterations} once unlocked
 
